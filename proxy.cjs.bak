@@ -1,0 +1,47 @@
+// proxy.js
+// Run: node proxy.js
+// Uses node-fetch@2 to allow require() style import.
+
+const express = require("express");
+const fetch = require("node-fetch"); // note: we install node-fetch@2 below
+const bodyParser = require("body-parser");
+const cors = require("cors");
+
+const app = express();
+app.use(cors());               // allow browser -> proxy
+app.use(bodyParser.json({ limit: "2mb" }));
+
+// Replace this with your Apps Script /exec URL (the one you deployed)
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxhu6fmfMvMfdl2wjHTa_1vQYCQOcXg9O0M14AJ97A7hgRwfmja8tmyYpRbWGpJfnY/exec";
+
+const PORT = 4000;
+
+app.post("/api/bookkeeping", async (req, res) => {
+  try {
+    console.log("Proxy received payload:", req.body);
+
+    // Forward to Apps Script
+    const r = await fetch(APPS_SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body),
+    });
+
+    // Try parse Apps Script JSON response
+    let json = null;
+    try {
+      json = await r.json();
+    } catch (err) {
+      console.warn("Apps Script response not JSON or empty:", err.message);
+      json = { proxied: true, status: r.status, text: await r.text().catch(()=>'') };
+    }
+
+    console.log("Apps Script responded:", json);
+    res.status(200).json({ proxied: true, appsScriptResponse: json });
+  } catch (err) {
+    console.error("Proxy error:", err);
+    res.status(500).json({ proxied: false, error: err.message });
+  }
+});
+
+app.listen(PORT, () => console.log(`✅ Proxy running at http://localhost:${PORT} — forwarding to Apps Script`));
