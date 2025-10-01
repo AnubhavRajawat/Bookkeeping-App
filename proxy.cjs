@@ -3,15 +3,14 @@
 // CommonJS (require) because file is .cjs
 
 // ----------------------
-// Required modules (order matters)
+// Required modules
 // ----------------------
 const path = require('path');
 const express = require('express');
 const fetch = require('node-fetch'); // v2
 const fs = require('fs');
 const Papa = require('papaparse');
-const morgan = require('morgan'); // optional but helpful; npm i morgan
-const cors = require('cors');
+const morgan = require('morgan'); // optional; npm i morgan
 const multer = require('multer');
 
 // ----------------------
@@ -19,19 +18,17 @@ const multer = require('multer');
 // ----------------------
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
-const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'uploads', 'master.csv'); // default local path
-const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || 'https://script.google.com/macros/s/AKfycbzFLKP9Tji3waC4xaYrbuhEllDaM5jT5yJjlKbDl18VhFpDRTxtQIgOLpO7X8bxFw2Z/exec';
+const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'uploads', 'master.csv');
+const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || 'https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec';
 const UPLOAD_SECRET = process.env.UPLOAD_SECRET || 'localdevsecret';
-console.log('[proxy] EXPECTED UPLOAD_SECRET =', UPLOAD_SECRET); // set a strong secret in Render
-const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*'; // allowlist
+console.log('[proxy] EXPECTED UPLOAD_SECRET =', UPLOAD_SECRET);
 
 // ----------------------
-// Multer (upload) setup
+// Multer setup (uploads/tmp dir)
 // ----------------------
 const tmpDir = path.join(__dirname, 'uploads', 'tmp');
-if (!fs.existsSync(tmpDir)) {
-  try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) { /* ignore */ }
-}
+if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
 const upload = multer({ dest: tmpDir });
 
 // ----------------------
@@ -40,46 +37,36 @@ const upload = multer({ dest: tmpDir });
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// morgan (optional)
-try {
-  app.use(morgan('dev'));
-} catch (e) {
-  console.log('[proxy] morgan not installed — running without detailed request logs. (npm i morgan for nicer logs)');
+// logging
+try { app.use(morgan('dev')); } catch (e) {
+  console.log('[proxy] morgan not installed — running without request logs');
 }
 
 // --- CORS allowlist middleware ---
 app.use((req, res, next) => {
-  const cfg = (process.env.CORS_ORIGIN || '*').trim(); 
-  const origin = req.get('Origin'); // browser Origin header
+  const cfg = (CORS_ORIGIN || '').trim();
+  const origin = req.get('Origin');
 
   if (cfg === '*') {
-    // Allow all origins
     res.setHeader('Access-Control-Allow-Origin', '*');
   } else {
-    // Split comma-separated allowlist
     const allowed = cfg.split(',').map(s => s.trim()).filter(Boolean);
     if (origin && allowed.includes(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin); // echo back matching origin
+      res.setHeader('Access-Control-Allow-Origin', origin);
     }
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-upload-secret');
 
-  if (req.method === 'OPTIONS') return res.sendStatus(204); // handle preflight
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-
-
 // ----------------------
-// In-memory parsed CSV
+// CSV Loader
 // ----------------------
 let csvData = [];
-
-// ----------------------
-// CSV loader helper
-// ----------------------
 function loadCsvFromDisk() {
   try {
     if (!fs.existsSync(CSV_PATH)) {
@@ -88,35 +75,21 @@ function loadCsvFromDisk() {
       return { ok: false, message: `CSV not found at ${CSV_PATH}` };
     }
     const fileContents = fs.readFileSync(CSV_PATH, 'utf8');
-    const parsed = Papa.parse(fileContents, {
-      header: true,
-      skipEmptyLines: true,
-      dynamicTyping: false,
-    });
-
+    const parsed = Papa.parse(fileContents, { header: true, skipEmptyLines: true });
     if (parsed.errors && parsed.errors.length > 0) {
-      console.warn('[proxy] CSV parse warnings (first 5):', parsed.errors.slice(0, 5));
-      // continue if data exists
+      console.warn('[proxy] CSV parse warnings:', parsed.errors.slice(0, 5));
     }
-
     csvData = parsed.data || [];
     console.log(`[proxy] Loaded CSV (${csvData.length} rows) from: ${CSV_PATH}`);
     return { ok: true, rows: csvData.length };
   } catch (err) {
     console.error('[proxy] Failed to load CSV:', err);
     csvData = [];
-    return { ok: false, message: err.message || String(err) };
+    return { ok: false, message: err.message };
   }
 }
-
-// initial load
 loadCsvFromDisk();
-
-// allow reload via SIGHUP
-process.on('SIGHUP', () => {
-  console.log('[proxy] Received SIGHUP - reloading CSV from disk...');
-  loadCsvFromDisk();
-});
+process.on('SIGHUP', () => loadCsvFromDisk());
 
 // ----------------------
 // Routes
@@ -136,122 +109,74 @@ app.get('/api/csv-data', (req, res) => {
 
 // Raw CSV
 app.get('/proxy/editor.csv', (req, res) => {
-  if (!fs.existsSync(CSV_PATH)) {
-    return res.status(404).send(`CSV not found at ${CSV_PATH}`);
-  }
+  if (!fs.existsSync(CSV_PATH)) return res.status(404).send(`CSV not found at ${CSV_PATH}`);
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'inline; filename=editor.csv');
   res.setHeader('Cache-Control', 'no-store, max-age=0');
-  const stream = fs.createReadStream(CSV_PATH);
-  stream.on('error', (err) => {
-    console.error('[proxy] Error streaming CSV:', err);
-    if (!res.headersSent) res.status(500).send('Error reading CSV');
-  });
-  stream.pipe(res);
+  fs.createReadStream(CSV_PATH).pipe(res);
 });
 
-// Static listing for folder containing CSV
-app.use('/proxy/files', express.static(path.dirname(CSV_PATH), {
-  index: false,
-  extensions: ['csv', 'txt', 'json'],
-}));
+// Static folder
+app.use('/proxy/files', express.static(path.dirname(CSV_PATH), { index: false }));
 
-// Manual reload
+// Reload CSV
 app.get('/api/reload-csv', (req, res) => {
   const result = loadCsvFromDisk();
   if (result.ok) return res.json({ success: true, rows: result.rows });
-  return res.status(500).json({ success: false, error: result.message || 'Failed to reload CSV' });
+  return res.status(500).json({ success: false, error: result.message });
 });
 
 // Proxy to Apps Script
 app.post('/api/bookkeeping', async (req, res) => {
-  if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes('YOUR_DEPLOYMENT_ID_HERE')) {
-    return res.status(500).json({ proxied: false, error: 'APPS_SCRIPT_URL not configured in env' });
+  if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes('YOUR_DEPLOYMENT_ID')) {
+    return res.status(500).json({ proxied: false, error: 'APPS_SCRIPT_URL not configured' });
   }
-
   try {
-    console.log('[proxy] Forwarding payload to Apps Script — keys:', Object.keys(req.body || {}).slice(0, 10));
     const upstream = await fetch(APPS_SCRIPT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
     });
-
     let appsResp;
-    try {
-      appsResp = await upstream.json();
-    } catch (e) {
-      appsResp = { rawText: await upstream.text().catch(() => ''), status: upstream.status };
-    }
-    console.log('[proxy] Apps Script responded with status', upstream.status);
-    res.status(200).json({ proxied: true, appsScriptResponse: appsResp });
+    try { appsResp = await upstream.json(); }
+    catch { appsResp = { rawText: await upstream.text(), status: upstream.status }; }
+    res.json({ proxied: true, appsScriptResponse: appsResp });
   } catch (err) {
-    console.error('[proxy] Error forwarding to Apps Script:', err);
-    res.status(500).json({ proxied: false, error: err.message || String(err) });
+    res.status(500).json({ proxied: false, error: err.message });
   }
 });
 
-// Root UI
-app.get('/', (req, res) => {
-  res.send(`
-    <h3>Local proxy</h3>
-    <ul>
-      <li><a href="/proxy/editor.csv">/proxy/editor.csv (raw CSV)</a></li>
-      <li><a href="/proxy/files/">/proxy/files/ (static folder)</a></li>
-      <li><a href="/api/csv-data">/api/csv-data (parsed JSON)</a></li>
-      <li><a href="/api/reload-csv">/api/reload-csv (reload CSV)</a></li>
-      <li><a href="/api/health">/api/health</a></li>
-    </ul>
-    <p>CSV path: <code>${CSV_PATH}</code></p>
-    <p>Apps Script URL: <code>${APPS_SCRIPT_URL.includes('YOUR_DEPLOYMENT_ID_HERE') ? 'NOT CONFIGURED' : 'configured'}</code></p>
-  `);
-});
-
-// ----------------------
-// Upload CSV endpoint (protected)
-// ----------------------
-app.post('/api/upload-csv', upload.single('file'), async (req, res) => {
+// Upload CSV (protected)
+app.post('/api/upload-csv', upload.single('file'), (req, res) => {
   try {
-    const incomingSecret = req.get('x-upload-secret') || req.body.upload_secret || req.query.upload_secret;
+    const incomingSecret = req.get('x-upload-secret');
     if (!incomingSecret || incomingSecret !== UPLOAD_SECRET) {
-      if (req.file && fs.existsSync(req.file.path)) try { fs.unlinkSync(req.file.path); } catch(e){/*ignore*/}
+      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
       return res.status(401).json({ success: false, error: 'Unauthorized' });
     }
-
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: 'Missing file' });
-    }
+    if (!req.file) return res.status(400).json({ success: false, error: 'Missing file' });
 
     const uploadsDir = path.join(__dirname, 'uploads');
     if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-
     const destPath = path.join(uploadsDir, 'master.csv');
+    fs.renameSync(req.file.path, destPath);
 
-    // Replace existing file (atomic on same filesystem)
-    try {
-      fs.renameSync(req.file.path, destPath);
-    } catch (errRename) {
-      // fallback to copy+unlink in case rename across filesystems
-      fs.copyFileSync(req.file.path, destPath);
-      try { fs.unlinkSync(req.file.path); } catch (e) { /* ignore */ }
-    }
-
-    console.log('[proxy] CSV uploaded by client ->', destPath);
-
-    // reload CSV into memory
     const r = loadCsvFromDisk();
-    if (r.ok) {
-      return res.json({ success: true, message: 'CSV uploaded and reloaded', rows: r.rows });
-    } else {
-      return res.status(500).json({ success: false, message: 'Uploaded but reload failed', error: r.message });
-    }
+    if (r.ok) return res.json({ success: true, message: 'CSV uploaded and reloaded', rows: r.rows });
+    return res.status(500).json({ success: false, message: 'Uploaded but reload failed', error: r.message });
   } catch (err) {
-    console.error('[proxy] Error during upload-csv:', err);
-    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
-      try { fs.unlinkSync(req.file.path); } catch (e) { /* ignore */ }
-    }
-    return res.status(500).json({ success: false, error: err.message || String(err) });
+    return res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// Root
+app.get('/', (req, res) => {
+  res.send(`<h3>Local proxy</h3>
+    <ul>
+      <li><a href="/proxy/editor.csv">Raw CSV</a></li>
+      <li><a href="/api/csv-data">Parsed JSON</a></li>
+      <li><a href="/api/reload-csv">Reload CSV</a></li>
+      <li><a href="/api/health">Health</a></li>
+    </ul>`);
 });
 
 // ----------------------
@@ -259,10 +184,4 @@ app.post('/api/upload-csv', upload.single('file'), async (req, res) => {
 // ----------------------
 app.listen(PORT, () => {
   console.log(`✅ Proxy listening on http://localhost:${PORT}`);
-  console.log(`   Raw CSV: http://localhost:${PORT}/proxy/editor.csv`);
-  console.log(`   Parsed JSON: http://localhost:${PORT}/api/csv-data`);
-  console.log(`   Reload CSV: http://localhost:${PORT}/api/reload-csv`);
-  if (APPS_SCRIPT_URL.includes('YOUR_DEPLOYMENT_ID_HERE')) {
-    console.warn('⚠️ APPS_SCRIPT_URL is not configured. Set env APPS_SCRIPT_URL to your Apps Script /exec URL.');
-  }
 });
