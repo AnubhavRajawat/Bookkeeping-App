@@ -321,165 +321,61 @@ const BookkeepingForm = () => {
   
     return { isValid: true };
   };
-  const PROXY_URL = process.env.REACT_APP_PROXY_URL;
+  
 
+  // Fetch CSV data from backend proxy on mount
   useEffect(() => {
     let mounted = true;
-    fetch(`${PROXY_URL}/api/csv-data`)
+  
+    const PROXY_URL = import.meta.env.VITE_PROXY_URL || 'http://localhost:4000';
+    const url = `${PROXY_URL}/api/csv-data`;
+  
+    console.log("Fetching CSV from:", url);
+  
+    fetch(url)
       .then(res => {
         if (!res.ok) throw new Error(`Failed to fetch CSV data: ${res.status}`);
         return res.json();
       })
       .then(payload => {
         if (!mounted) return;
-        // your state updates here...
+  
+        // Accept multiple payload shapes for compatibility with different proxies:
+        let rows = [];
+        if (Array.isArray(payload)) {
+          rows = payload;
+        } else if (payload && Array.isArray(payload.data)) {
+          rows = payload.data;
+        } else if (payload && Array.isArray(payload.rows)) {
+          rows = payload.rows;
+        } else {
+          setCsvLoaded(false);
+          setCsvError('No CSV rows found in response');
+          console.info('CSV data empty or not an array. Payload:', payload);
+          return;
+        }
+  
+        if (!Array.isArray(rows) || rows.length === 0) {
+          setCsvLoaded(false);
+          setCsvError('no rows in CSV');
+          console.info('CSV data empty or not an array.');
+          return;
+        }
+  
+        // ✅ success: set your state here
+        setCsvLoaded(true);
+        setCsvError(null);
+        setCsvRows(rows);
       })
       .catch(err => {
-        console.error("Error loading CSV data:", err);
+        console.error("Error loading CSV from proxy:", err);
+        setCsvLoaded(false);
+        setCsvError(err.message || String(err));
       });
   
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, []);
   
-      // Accept multiple payload shapes for compatibility with different proxies:
-      // 1) an array of rows (old frontend expectation)
-      // 2) an object { rows: number, data: [...] } (proxy.cjs current shape)
-      // 3) an object { data: [...] }
-      let rows = [];
-      if (Array.isArray(payload)) {
-        rows = payload;
-      } else if (payload && Array.isArray(payload.data)) {
-        rows = payload.data;
-      } else if (payload && Array.isArray(payload.rows)) {
-        // defensive: some backends might accidentally put array on "rows"
-        rows = payload.rows;
-      } else {
-        setCsvLoaded(false);
-        setCsvError('No CSV rows found in response');
-        console.info('CSV data empty or not an array. Payload:', payload);
-        return;
-      }
-
-      if (!Array.isArray(rows) || rows.length === 0) {
-        setCsvLoaded(false);
-        setCsvError('no rows in CSV');
-        console.info('CSV data empty or not an array.');
-        return;
-      }
-
-      // ======= Clean headers (strip surrounding quotes + trim) =======
-      const rawHeaders = Object.keys(rows[0] || {});
-      const headers = rawHeaders.map(h => {
-        if (h === undefined || h === null) return "";
-        return String(h).replace(/^[\s"']+|[\s"']+$/g, '').trim();
-      });
-
-      // broaden the header variants so that we catch many real-world CSV column names
-      const map = {
-        companyNo: ["companyno", "company_no", "company_number", "company number", "companyNumber", "regno", "reg_no", "registration", "registration_no", "company id", "companyid", "id"],
-        companyName: ["companyname", "company_name", "name", "client_name", "clientname"],
-        companyUTR: ["companyutr", "company_utr", "utr", "tax_reference", "taxref", "tax_reference_no", "tax_number", "tax_no", "utr_no"],
-        clientReference: ["clientreference", "client_reference", "reference", "client_ref", "clientref", "client reference"],
-        fileName: ["filename", "file_name", "file", "file title"],
-        bookkeeper: ["bookkeeper", "assigned_to", "worker", "assignedto", "assigned", "owner"],
-        reviewer: ["reviewer", "reviewed_by", "checker", "checked_by"]
-      };
-
-      const actual = {
-        companyNo: findHeader(headers, map.companyNo),
-        companyName: findHeader(headers, map.companyName),
-        companyUTR: findHeader(headers, map.companyUTR),
-        clientReference: findHeader(headers, map.clientReference),
-        fileName: findHeader(headers, map.fileName),
-        bookkeeper: findHeader(headers, map.bookkeeper),
-        reviewer: findHeader(headers, map.reviewer)
-      };
-
-      console.debug("Cleaned CSV headers:", headers);
-      console.debug("Detected CSV column mapping:", actual);
-
-      const getVal = (row, colName) => {
-        if (!colName) return "";
-        const raw = row[colName];
-        if (raw === undefined || raw === null) return "";
-        return String(raw).replace(/^[\s"']+|[\s"']+$/g, '').trim();
-      };
-
-      const sCompanyNos = new Set();
-      const sCompanyNames = new Set();
-      const sClientRefs = new Set();
-      const sFileNames = new Set();
-      const sBookkeepers = new Set();
-      const sReviewers = new Set();
-      const companyMap = new Map();
-
-      rows.forEach(row => {
-        const cno = getVal(row, actual.companyNo);
-        const cname = getVal(row, actual.companyName);
-        const cutr = getVal(row, actual.companyUTR);
-        const cref = getVal(row, actual.clientReference);
-        const fname = getVal(row, actual.fileName);
-        const bkeeper = getVal(row, actual.bookkeeper);
-        const reviewer = getVal(row, actual.reviewer);
-
-        if (cno) {
-          const key = cno.toString().trim();
-          sCompanyNos.add(key);
-
-          if (!companyMap.has(key)) {
-            companyMap.set(key, {
-              companyName: cname || "",
-              companyUTR: cutr || "",
-              clientReference: cref || "",
-              bookkeeper: bkeeper || ""
-            });
-          } else {
-            const existing = companyMap.get(key);
-            if (!existing.companyName && cname) existing.companyName = cname;
-            if (!existing.companyUTR && cutr) existing.companyUTR = cutr;
-            if (!existing.clientReference && cref) existing.clientReference = cref;
-            if (!existing.bookkeeper && bkeeper) existing.bookkeeper = bkeeper;
-            companyMap.set(key, existing);
-          }
-        }
-
-        if (cname) sCompanyNames.add(cname);
-        if (cref) sClientRefs.add(cref);
-        if (fname) sFileNames.add(fname);
-        if (bkeeper) sBookkeepers.add(bkeeper);
-        if (reviewer) sReviewers.add(reviewer);
-      });
-
-      const companyNosArr = [...companyMap.keys()].map(k => String(k));
-
-      setCompanyDataMap(companyMap);
-      setCompanyNumbers(companyNosArr.sort((a, b) => a.localeCompare(b)));
-      setCompanyNames([...sCompanyNames].sort((a, b) => a.localeCompare(b)));
-      setClientReferences([...sClientRefs].sort((a, b) => a.localeCompare(b)));
-      setFileNames([...sFileNames].sort((a, b) => a.localeCompare(b)));
-      setBookkeepers([...sBookkeepers].sort((a, b) => a.localeCompare(b)));
-      setReviewers([...sReviewers].sort((a, b) => a.localeCompare(b)));
-
-      setCsvLoaded(true);
-      setCsvError('');
-
-      console.log("CSV suggestions loaded:", {
-        companies_count: companyMap.size,
-        sample_companyNos: companyNosArr.slice(0, 6),
-        bookkeepers_count: sBookkeepers.size
-      });
-    })
-    .catch(err => {
-      console.error("Error loading CSV from backend:", err);
-      if (!mounted) return;
-      setCsvLoaded(false);
-      setCsvError(String(err.message || err));
-    });
-
-  return () => { mounted = false; };
-}, []);
 
   // Submit handler
   const handleSubmit = async () => {
