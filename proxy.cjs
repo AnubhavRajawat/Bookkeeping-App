@@ -1,187 +1,101 @@
 // proxy.cjs
-// Run: node proxy.cjs
-// CommonJS (require) because file is .cjs
-
-// ----------------------
-// Required modules
-// ----------------------
-const path = require('path');
+// CommonJS Express proxy that handles CORS preflight properly and forwards requests.
+// Usage: NODE_ENV=production TARGET_URL="https://script.google.com/..." node proxy.cjs
 const express = require('express');
-const fetch = require('node-fetch'); // v2
-const fs = require('fs');
-const Papa = require('papaparse');
-const morgan = require('morgan'); // optional; npm i morgan
-const multer = require('multer');
+const fetch = require('node-fetch'); // install node-fetch@2 if using node < 18
+const bodyParser = require('body-parser');
 
-// ----------------------
-// Config / env
-// ----------------------
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
-const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'uploads', 'master.csv');
-const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || 'https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec';
-const UPLOAD_SECRET = process.env.UPLOAD_SECRET || 'localdevsecret';
-const CORS_ORIGIN = process.env.CORS_ORIGIN || '*'; // allowlist
-console.log('[proxy] EXPECTED UPLOAD_SECRET =', UPLOAD_SECRET);
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true }));
 
-// ----------------------
-// Multer setup (uploads/tmp dir)
-// ----------------------
-const tmpDir = path.join(__dirname, 'uploads', 'tmp');
-if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-const upload = multer({ dest: tmpDir });
+const TARGET_URL = process.env.TARGET_URL || 'https://your-google-apps-script-url.example';
+const PORT = process.env.PORT || 3000;
 
-// ----------------------
-// Middlewares
-// ----------------------
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+// Allowed origins: add your production & preview Vercel hosts here
+const allowedOrigins = new Set([
+  'https://bookkeeping-app-zeta.vercel.app',    // your main frontend
+  'https://bookkeeping-app-rmvi.onrender.com', // (if frontend served here in some case)
+  'http://localhost:5173',                      // local dev
+  // add any explicit preview URLs you use, e.g.:
+  // 'https://bookkeeping-1znkkjkoy-anubhavrajawats-projects.vercel.app'
+]);
 
-// logging
-try { app.use(morgan('dev')); } catch (e) {
-  console.log('[proxy] morgan not installed — running without request logs');
+// Alternatively allow any vercel.app preview origins via pattern:
+function originAllowed(origin) {
+  if (!origin) return false;
+  if (allowedOrigins.has(origin)) return true;
+  // allow *.vercel.app (preview deployments) — only if you trust all vercel.app subdomains
+  try {
+    const url = new URL(origin);
+    if (url.hostname.endsWith('.vercel.app')) return true;
+  } catch (e) { /* not a valid origin */ }
+  return false;
 }
 
-// --- CORS allowlist middleware ---
+// CORS middleware
 app.use((req, res, next) => {
-  const cfg = (CORS_ORIGIN || '').trim();
   const origin = req.get('Origin');
 
-  if (cfg === '*') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  } else {
-    const allowed = cfg.split(',').map(s => s.trim()).filter(Boolean);
-    if (origin && allowed.includes(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
+  if (origin && originAllowed(origin)) {
+    // Mirror the incoming Origin — required for credentialed requests and security
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    // Allow credentials if needed: res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-upload-secret');
+    // Cache preflight for a short time:
+    res.setHeader('Access-Control-Max-Age', '600'); // 10 minutes
+  }
+
+  // OPTIONS preflight: respond immediately if origin is allowed
+  if (req.method === 'OPTIONS') {
+    if (origin && originAllowed(origin)) {
+      return res.sendStatus(204); // No Content
+    } else {
+      // If origin not allowed, explicitly reject with 403 so it's obvious in logs (browser will still block).
+      return res.status(403).json({ error: 'CORS origin not allowed' });
     }
   }
 
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-upload-secret');
-
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-// ----------------------
-// CSV Loader
-// ----------------------
-let csvData = [];
-function loadCsvFromDisk() {
-  try {
-    if (!fs.existsSync(CSV_PATH)) {
-      console.warn(`[proxy] CSV file not found at: ${CSV_PATH}`);
-      csvData = [];
-      return { ok: false, message: `CSV not found at ${CSV_PATH}` };
-    }
-    const fileContents = fs.readFileSync(CSV_PATH, 'utf8');
-    const parsed = Papa.parse(fileContents, { header: true, skipEmptyLines: true });
-    if (parsed.errors && parsed.errors.length > 0) {
-      console.warn('[proxy] CSV parse warnings:', parsed.errors.slice(0, 5));
-    }
-    csvData = parsed.data || [];
-    console.log(`[proxy] Loaded CSV (${csvData.length} rows) from: ${CSV_PATH}`);
-    return { ok: true, rows: csvData.length };
-  } catch (err) {
-    console.error('[proxy] Failed to load CSV:', err);
-    csvData = [];
-    return { ok: false, message: err.message };
-  }
-}
-loadCsvFromDisk();
-process.on('SIGHUP', () => loadCsvFromDisk());
-
-// ----------------------
-// Routes
-// ----------------------
-
-// Health
-app.get('/api/health', (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString(), csvRows: csvData.length });
-});
-
-// CSV JSON
-app.get('/api/csv-data', (req, res) => {
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-store, max-age=0');
-  res.json({ rows: csvData.length, data: csvData });
-});
-
-// Raw CSV
-app.get('/proxy/editor.csv', (req, res) => {
-  if (!fs.existsSync(CSV_PATH)) return res.status(404).send(`CSV not found at ${CSV_PATH}`);
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'inline; filename=editor.csv');
-  res.setHeader('Cache-Control', 'no-store, max-age=0');
-  fs.createReadStream(CSV_PATH).pipe(res);
-});
-
-// Static folder
-app.use('/proxy/files', express.static(path.dirname(CSV_PATH), { index: false }));
-
-// Reload CSV
-app.get('/api/reload-csv', (req, res) => {
-  const result = loadCsvFromDisk();
-  if (result.ok) return res.json({ success: true, rows: result.rows });
-  return res.status(500).json({ success: false, error: result.message });
-});
-
-// Proxy to Apps Script
+// Example POST proxy endpoint
 app.post('/api/bookkeeping', async (req, res) => {
-  if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes('YOUR_DEPLOYMENT_ID')) {
-    return res.status(500).json({ proxied: false, error: 'APPS_SCRIPT_URL not configured' });
+  const origin = req.get('Origin');
+  if (!origin || !originAllowed(origin)) {
+    return res.status(403).json({ error: 'Origin not allowed' });
   }
+
   try {
-    const upstream = await fetch(APPS_SCRIPT_URL, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
+    // Forward headers you want (you can drop Authorization if not needed)
+    const forwardHeaders = {
+      'Content-Type': req.get('Content-Type') || 'application/json',
+      // copy any other headers needed by target, such as Authorization:
+      // 'Authorization': req.get('Authorization') || '',
+    };
+
+    // If your target expects URL-encoded form rather than JSON, adjust accordingly.
+    const fetchResponse = await fetch(TARGET_URL, {
+      method: 'POST',
+      headers: forwardHeaders,
+      body: JSON.stringify(req.body),
+      // credentials: 'include' // not relevant server-to-server
     });
-    let appsResp;
-    try { appsResp = await upstream.json(); }
-    catch { appsResp = { rawText: await upstream.text(), status: upstream.status }; }
-    res.json({ proxied: true, appsScriptResponse: appsResp });
+
+    const text = await fetchResponse.text();
+    // Pass through status and body
+    // Ensure we re-set CORS header on the actual response too (already done in middleware, but double-check)
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.status(fetchResponse.status).send(text);
   } catch (err) {
-    res.status(500).json({ proxied: false, error: err.message });
+    console.error('Proxy error:', err);
+    // Ensure CORS header present on error responses too (so browser can see the message during dev)
+    if (origin && originAllowed(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
+    res.status(502).json({ error: 'Bad gateway', details: err.message });
   }
 });
 
-// Upload CSV (protected)
-app.post('/api/upload-csv', upload.single('file'), (req, res) => {
-  try {
-    const incomingSecret = req.get('x-upload-secret');
-    if (!incomingSecret || incomingSecret !== UPLOAD_SECRET) {
-      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      return res.status(401).json({ success: false, error: 'Unauthorized' });
-    }
-    if (!req.file) return res.status(400).json({ success: false, error: 'Missing file' });
+app.get('/', (req, res) => res.send('Proxy alive'));
 
-    const uploadsDir = path.join(__dirname, 'uploads');
-    if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-    const destPath = path.join(uploadsDir, 'master.csv');
-    fs.renameSync(req.file.path, destPath);
-
-    const r = loadCsvFromDisk();
-    if (r.ok) return res.json({ success: true, message: 'CSV uploaded and reloaded', rows: r.rows });
-    return res.status(500).json({ success: false, message: 'Uploaded but reload failed', error: r.message });
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// Root
-app.get('/', (req, res) => {
-  res.send(`<h3>Local proxy</h3>
-    <ul>
-      <li><a href="/proxy/editor.csv">Raw CSV</a></li>
-      <li><a href="/api/csv-data">Parsed JSON</a></li>
-      <li><a href="/api/reload-csv">Reload CSV</a></li>
-      <li><a href="/api/health">Health</a></li>
-    </ul>`);
-});
-
-// ----------------------
-// Start server
-// ----------------------
-app.listen(PORT, () => {
-  console.log(`✅ Proxy listening on http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`Proxy listening on port ${PORT}, proxying to ${TARGET_URL}`));
