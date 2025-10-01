@@ -239,15 +239,16 @@ const BookkeepingForm = () => {
   const [showSetupInstructions, setShowSetupInstructions] = useState(false);
 
   // CSV/autocomplete lists / maps (populated from backend CSV)
-  const [csvLoaded, setCsvLoaded] = useState(false);
-  const [csvError, setCsvError] = useState('');
-  const [companyNumbers, setCompanyNumbers] = useState([]);
-  const [companyNames, setCompanyNames] = useState([]);
-  const [clientReferences, setClientReferences] = useState([]);
-  const [fileNames, setFileNames] = useState([]);
-  const [bookkeepers, setBookkeepers] = useState([]);
-  const [reviewers, setReviewers] = useState([]);
-  const [companyDataMap, setCompanyDataMap] = useState(new Map());
+const [csvLoaded, setCsvLoaded] = useState(false);
+const [csvError, setCsvError] = useState('');
+const [csvRows, setCsvRows] = useState([]);   // ✅ add this
+const [companyNumbers, setCompanyNumbers] = useState([]);
+const [companyNames, setCompanyNames] = useState([]);
+const [clientReferences, setClientReferences] = useState([]);
+const [fileNames, setFileNames] = useState([]);
+const [bookkeepers, setBookkeepers] = useState([]);
+const [reviewers, setReviewers] = useState([]);
+const [companyDataMap, setCompanyDataMap] = useState(new Map());
 
   // init serial + month
   useEffect(() => {
@@ -329,51 +330,87 @@ const BookkeepingForm = () => {
   useEffect(() => {
     let mounted = true;
   
-    const PROXY_URL = import.meta.env.VITE_PROXY_URL || 'https://bookkeeping-app-rmvi.onrender.com';
-    const url = `${PROXY_URL}/api/csv-data`;
-  
-    console.log("Fetching CSV from:", url);
-  
-    fetch(url)
-      .then(res => {
-        if (!res.ok) throw new Error(`Failed to fetch CSV data: ${res.status}`);
-        return res.json();
-      })
-      .then(payload => {
-        if (!mounted) return;
-  
-        // Accept multiple payload shapes for compatibility with different proxies:
-        let rows = [];
-        if (Array.isArray(payload)) {
-          rows = payload;
-        } else if (payload && Array.isArray(payload.data)) {
-          rows = payload.data;
-        } else if (payload && Array.isArray(payload.rows)) {
-          rows = payload.rows;
-        } else {
-          setCsvLoaded(false);
-          setCsvError('No CSV rows found in response');
-          console.info('CSV data empty or not an array. Payload:', payload);
-          return;
+    // inside useEffect
+const PROXY_URL = import.meta.env.VITE_PROXY_URL || 'https://bookkeeping-app-rmvi.onrender.com';
+const url = `${PROXY_URL}/api/csv-data`;
+
+console.log("Fetching CSV from:", url);
+
+fetch(url)
+  .then(res => {
+    if (!res.ok) throw new Error(`Failed to fetch CSV data: ${res.status}`);
+    return res.json();
+  })
+  .then(payload => {
+    if (!mounted) return;
+
+    // Accept multiple payload shapes for compatibility with different proxies:
+    let rows = [];
+    if (Array.isArray(payload)) {
+      rows = payload;
+    } else if (payload && Array.isArray(payload.data)) {
+      rows = payload.data;
+    } else if (payload && Array.isArray(payload.rows)) {
+      rows = payload.rows;
+    } else {
+      setCsvLoaded(false);
+      setCsvError('No CSV rows found in response');
+      console.info('CSV data empty or not an array. Payload:', payload);
+      return;
+    }
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      setCsvLoaded(false);
+      setCsvError('no rows in CSV');
+      console.info('CSV data empty or not an array.');
+      return;
+    }
+
+    // ✅ success: set your state here
+    setCsvLoaded(true);
+    setCsvError(null);
+    setCsvRows(rows);
+
+    // ----- Fix B: populate autocomplete/dropdown lists from rows -----
+    // Helper to safely read column with multiple possible header names
+    const getValue = (row, keys) => {
+      for (const k of keys) {
+        if (Object.prototype.hasOwnProperty.call(row, k) && row[k] != null) {
+          return String(row[k]).trim();
         }
-  
-        if (!Array.isArray(rows) || rows.length === 0) {
-          setCsvLoaded(false);
-          setCsvError('no rows in CSV');
-          console.info('CSV data empty or not an array.');
-          return;
-        }
-  
-        // ✅ success: set your state here
-        setCsvLoaded(true);
-        setCsvError(null);
-        setCsvRows(rows);
-      })
-      .catch(err => {
-        console.error("Error loading CSV from proxy:", err);
-        setCsvLoaded(false);
-        setCsvError(err.message || String(err));
-      });
+      }
+      return '';
+    };
+
+    // Provide common header name fallbacks — update these to match your CSV if needed
+    const colCompanyName = ['Company Name', 'company_name', 'companyName', 'Company'];
+    const colCompanyNumber = ['Company Number', 'company_number', 'companyNumber', 'Company No'];
+    const colClientRef = ['Client Reference', 'client_reference', 'ClientRef', 'Client'];
+    const colFileName = ['File Source', 'file', 'filename', 'File Name'];
+    const colBookkeeper = ['Bookkeeper', 'bookkeeper', 'Assigned To'];
+    const colReviewer = ['Reviewer', 'reviewer', 'Reviewed By'];
+
+    const names = [...new Set(rows.map(r => getValue(r, colCompanyName)).filter(Boolean))];
+    const numbers = [...new Set(rows.map(r => getValue(r, colCompanyNumber)).filter(Boolean))];
+    const clients = [...new Set(rows.map(r => getValue(r, colClientRef)).filter(Boolean))];
+    const files = [...new Set(rows.map(r => getValue(r, colFileName)).filter(Boolean))];
+    const keepers = [...new Set(rows.map(r => getValue(r, colBookkeeper)).filter(Boolean))];
+    const reviewersList = [...new Set(rows.map(r => getValue(r, colReviewer)).filter(Boolean))];
+
+    setCompanyNames(names);
+    setCompanyNumbers(numbers);
+    setClientReferences(clients);
+    setFileNames(files);
+    setBookkeepers(keepers);
+    setReviewers(reviewersList);
+    // ----------------------------------------------------------------
+  })
+  .catch(err => {
+    console.error("Error loading CSV from proxy:", err);
+    setCsvLoaded(false);
+    setCsvError(err.message || String(err));
+  });
+
   
     return () => { mounted = false; };
   }, []);
