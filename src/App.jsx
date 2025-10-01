@@ -15,9 +15,11 @@ import {
 } from "lucide-react";
 import Papa from "papaparse"; // optional, kept only if frontend upload ever used
 
-// Proxy endpoints used by the front-end
-const GOOGLE_APPS_SCRIPT_URL = "http://localhost:4000/api/bookkeeping";
-const CSV_DATA_URL = "http://localhost:4000/api/csv-data";
+const PROXY_URL = import.meta.env.VITE_PROXY_URL || import.meta.env.REACT_APP_PROXY_URL || 'https://bookkeeping-app-rmvi.onrender.com';
+
+// central endpoints used by frontend
+const CSV_DATA_URL = `${PROXY_URL}/api/csv-data`;
+const GOOGLE_APPS_SCRIPT_URL = `${PROXY_URL}/api/bookkeeping`;
 
 /* ---------- AutocompleteInput component (reusable) ---------- */
 const AutocompleteInput = ({
@@ -327,7 +329,7 @@ const BookkeepingForm = () => {
   useEffect(() => {
     let mounted = true;
   
-    const PROXY_URL = import.meta.env.VITE_PROXY_URL || 'http://localhost:4000';
+    const PROXY_URL = import.meta.env.VITE_PROXY_URL || 'https://bookkeeping-app-rmvi.onrender.com';
     const url = `${PROXY_URL}/api/csv-data`;
   
     console.log("Fetching CSV from:", url);
