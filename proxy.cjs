@@ -47,21 +47,29 @@ try {
   console.log('[proxy] morgan not installed — running without detailed request logs. (npm i morgan for nicer logs)');
 }
 
-// --- CORS allowlist middleware (replace previous simple CORS block) ---
+// --- CORS allowlist middleware ---
 app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  const allowedOrigin = process.env.CORS_ORIGIN || 'https://bookkeeping-app-teal.vercel.app';
+  const cfg = (process.env.CORS_ORIGIN || '*').trim(); 
+  const origin = req.get('Origin'); // browser Origin header
 
-  if (origin && origin === allowedOrigin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
+  if (cfg === '*') {
+    // Allow all origins
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else {
+    // Split comma-separated allowlist
+    const allowed = cfg.split(',').map(s => s.trim()).filter(Boolean);
+    if (origin && allowed.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin); // echo back matching origin
+    }
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-upload-secret');
 
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  if (req.method === 'OPTIONS') return res.sendStatus(204); // handle preflight
   next();
 });
+
 
 
 // ----------------------
