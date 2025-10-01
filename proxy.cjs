@@ -1,125 +1,138 @@
 // proxy.cjs
-// CommonJS Express proxy that handles CORS preflight and forwards requests.
-// Usage example:
-//   TARGET_URL="https://script.google.com/macros/s/xxxxx/exec" PORT=3000 node proxy.cjs
-// If you deploy to Render/Vercel make sure TARGET_URL is set in that platform's env vars.
+// CommonJS Express proxy that handles CORS preflight properly and forwards requests.
+// Usage: TARGET_URL="https://your-target.example" PORT=10000 node proxy.cjs
 
 const express = require('express');
-const fetch = require('node-fetch'); // node-fetch@2 recommended for CommonJS (or use global fetch in Node >=18)
 const bodyParser = require('body-parser');
-const querystring = require('querystring');
+
+let fetchImpl;
+try {
+  // Node 18+ has global fetch
+  fetchImpl = globalThis.fetch;
+  if (!fetchImpl) {
+    fetchImpl = require('node-fetch'); // ensure node-fetch@2 is installed for Node < 18
+  }
+} catch (e) {
+  fetchImpl = require('node-fetch');
+}
 
 const app = express();
 app.use(bodyParser.json({ limit: '10mb' }));
-app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true }));
 
-const TARGET_URL = (process.env.TARGET_URL || 'https://your-google-apps-script-url.example').replace(/\/$/, '');
+const TARGET_URL = process.env.TARGET_URL || '';
 const PORT = process.env.PORT || 3000;
 
-// Allowed origins: add your production & preview Vercel hosts here
+if (!TARGET_URL) {
+  console.error('ERROR: TARGET_URL not set. Set env var TARGET_URL to your Google Apps Script URL.');
+}
+
 const allowedOrigins = new Set([
-  'https://bookkeeping-app-zeta.vercel.app',    // main frontend
-  'https://bookkeeping-1znkkjkoy-anubhavrajawats-projects.vercel.app', // example preview (add real ones you use)
-  'http://localhost:5173',                      // local dev
-  // add other explicit origins you need
+  'https://bookkeeping-app-zeta.vercel.app',
+  // optionally add other explicit frontends:
+  // 'https://bookkeeping-1znkkjkoy-anubhavrajawats-projects.vercel.app',
+  'http://localhost:5173'
 ]);
 
 function originAllowed(origin) {
   if (!origin) return false;
   if (allowedOrigins.has(origin)) return true;
   try {
-    const url = new URL(origin);
-    // allow any Vercel preview subdomain if you trust it
-    if (url.hostname.endsWith('.vercel.app')) return true;
-  } catch (e) { /* invalid origin */ }
+    const u = new URL(origin);
+    if (u.hostname.endsWith('.vercel.app')) return true; // allow vercel preview subdomains
+  } catch (e) {}
   return false;
 }
 
-// CORS middleware
+// Simple request logger for Render logs
 app.use((req, res, next) => {
-  const origin = req.get('Origin');
-
-  if (origin && originAllowed(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    // Uncomment if you use cookies/credentials:
-    // res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-upload-secret');
-    res.setHeader('Access-Control-Max-Age', '600'); // cache preflight for 10 minutes
-  }
-
-  if (req.method === 'OPTIONS') {
-    if (origin && originAllowed(origin)) {
-      return res.sendStatus(204);
-    } else {
-      return res.status(403).json({ error: 'CORS origin not allowed' });
-    }
-  }
-
+  console.log(`${new Date().toISOString()} -> ${req.method} ${req.originalUrl} Origin:${req.get('Origin') || '-'}`);
   next();
 });
 
-// Generic proxy for all /api/* routes
-app.all('/api/*', async (req, res) => {
+// CORS middleware + preflight handling
+app.use((req, res, next) => {
   const origin = req.get('Origin');
-  if (!origin || !originAllowed(origin)) {
-    return res.status(403).json({ error: 'Origin not allowed' });
+  if (origin && originAllowed(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-upload-secret');
+    res.setHeader('Access-Control-Max-Age', '600'); // cache preflight
   }
 
-  // Build target URL: strip /api prefix and append path/query to TARGET_URL
-  const forwardPath = req.path.replace(/^\/api/, '') || '/';
-  const forwardUrl = TARGET_URL + forwardPath + (Object.keys(req.query).length ? `?${querystring.stringify(req.query)}` : '');
+  if (req.method === 'OPTIONS') {
+    if (origin && originAllowed(origin)) return res.sendStatus(204);
+    return res.status(403).json({ error: 'CORS origin not allowed' });
+  }
+  next();
+});
+
+// Health route — quick check that the proxy started
+app.get('/', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain');
+  res.send(`Proxy alive. Proxying to ${TARGET_URL || '(no TARGET_URL set)'}`);
+});
+
+// GET /api/csv-data -> proxy GET (target must accept GET)
+app.get('/api/csv-data', async (req, res) => {
+  const origin = req.get('Origin');
+  if (!origin || !originAllowed(origin)) return res.status(403).json({ error: 'Origin not allowed' });
 
   try {
-    // Build forward headers (copy content-type; you can copy auth header if needed)
-    const forwardHeaders = {
-      'Accept': req.get('Accept') || '*/*',
-    };
-
-    if (req.get('Content-Type')) forwardHeaders['Content-Type'] = req.get('Content-Type');
-
-    // If your target expects form data (x-www-form-urlencoded) handle that
-    let body;
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      if ((req.get('Content-Type') || '').includes('application/json')) {
-        body = JSON.stringify(req.body || {});
-      } else if ((req.get('Content-Type') || '').includes('application/x-www-form-urlencoded')) {
-        body = querystring.stringify(req.body || {});
-      } else {
-        // For other content types (text/plain etc.) try to forward raw body via req.body (express bodyParser may have parsed it)
-        body = req.rawBody || JSON.stringify(req.body || {});
-      }
-    }
-
-    console.log(`[proxy] ${req.method} ${req.originalUrl} -> ${forwardUrl}`);
-
-    const fetchOptions = {
-      method: req.method,
-      headers: forwardHeaders,
-      // only include body for methods that allow it
-      body: ['GET', 'HEAD'].includes(req.method) ? undefined : body,
-    };
-
-    const targetRes = await fetch(forwardUrl, fetchOptions);
-
-    const text = await targetRes.text();
-
-    // Mirror CORS on the proxied response too
+    const url = `${TARGET_URL.replace(/\/$/, '')}/csv-data`; // adjust target path if necessary
+    console.log(`Proxying GET to ${url}`);
+    const fetchRes = await fetchImpl(url, { method: 'GET' });
+    const text = await fetchRes.text();
     res.setHeader('Access-Control-Allow-Origin', origin);
-    res.status(targetRes.status);
-
-    // Forward content-type from target if present
-    const ct = targetRes.headers.get('content-type');
-    if (ct) res.setHeader('Content-Type', ct);
-
-    return res.send(text);
+    res.status(fetchRes.status).send(text);
   } catch (err) {
-    console.error('[proxy] error forwarding to target:', err);
+    console.error('Error proxying GET /api/csv-data:', err);
     if (origin && originAllowed(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
-    return res.status(502).json({ error: 'Bad gateway', details: err.message });
+    res.status(502).json({ error: 'Bad gateway', details: err.message });
   }
 });
 
-app.get('/', (req, res) => res.send(`Proxy running. Forwarding /api/* to: ${TARGET_URL}`));
+// POST /api/bookkeeping -> proxy POST
+app.post('/api/bookkeeping', async (req, res) => {
+  const origin = req.get('Origin');
+  if (!origin || !originAllowed(origin)) return res.status(403).json({ error: 'Origin not allowed' });
 
-app.listen(PORT, () => console.log(`Proxy listening on port ${PORT}, forwarding /api/* -> ${TARGET_URL}`));
+  if (!TARGET_URL) {
+    return res.status(500).json({ error: 'TARGET_URL not configured on server' });
+  }
+
+  try {
+    const url = TARGET_URL; // full URL of the Apps Script doPost
+    console.log(`Proxying POST to ${url} bodyKeys:${Object.keys(req.body).length}`);
+    const forwardHeaders = {
+      'Content-Type': req.get('Content-Type') || 'application/json',
+    };
+
+    const fetchRes = await fetchImpl(url, {
+      method: 'POST',
+      headers: forwardHeaders,
+      body: JSON.stringify(req.body),
+    });
+
+    const text = await fetchRes.text();
+
+    // Log status and (truncated) body for debugging
+    console.log(`Upstream status: ${fetchRes.status}`);
+    if (text && text.length > 1000) {
+      console.log('Upstream body (truncated):', text.slice(0, 1000));
+    } else {
+      console.log('Upstream body:', text);
+    }
+
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.status(fetchRes.status).send(text);
+  } catch (err) {
+    console.error('Proxy POST error:', err && err.stack ? err.stack : err);
+    if (origin && originAllowed(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
+    res.status(502).json({ error: 'Bad gateway', details: err.message || String(err) });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Proxy listening on port ${PORT}. TARGET_URL=${TARGET_URL}`);
+});
