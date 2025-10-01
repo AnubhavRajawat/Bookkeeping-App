@@ -49,26 +49,16 @@ try {
 
 // --- CORS allowlist middleware (replace previous simple CORS block) ---
 app.use((req, res, next) => {
-  const cfg = (process.env.CORS_ORIGIN || '*').trim();
+  const origin = req.headers.origin;
+  const allowedOrigin = process.env.CORS_ORIGIN || 'https://bookkeeping-app-teal.vercel.app';
 
-  // If wildcard, allow everything (only use for testing/dev)
-  if (cfg === '*') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  } else {
-    // config may be a comma-separated list of origins
-    const allowed = cfg.split(',').map(s => s.trim()).filter(Boolean);
-    const origin = req.get('Origin');
-
-    if (origin && allowed.includes(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-    }
+  if (origin && origin === allowedOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
   }
 
-  // always allow these methods/headers we use
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-upload-secret');
 
-  // short-circuit preflight
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
