@@ -47,14 +47,32 @@ try {
   console.log('[proxy] morgan not installed — running without detailed request logs. (npm i morgan for nicer logs)');
 }
 
-// CORS headers (also allow x-upload-secret)
+// --- CORS allowlist middleware (replace previous simple CORS block) ---
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', CORS_ORIGIN);
+  const cfg = (process.env.CORS_ORIGIN || '*').trim();
+
+  // If wildcard, allow everything (only use for testing/dev)
+  if (cfg === '*') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else {
+    // config may be a comma-separated list of origins
+    const allowed = cfg.split(',').map(s => s.trim()).filter(Boolean);
+    const origin = req.get('Origin');
+
+    if (origin && allowed.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+  }
+
+  // always allow these methods/headers we use
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-upload-secret');
+
+  // short-circuit preflight
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
+
 
 // ----------------------
 // In-memory parsed CSV
