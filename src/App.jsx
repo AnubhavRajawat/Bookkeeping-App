@@ -321,20 +321,28 @@ const BookkeepingForm = () => {
   
     return { isValid: true };
   };
+  const PROXY_URL = process.env.REACT_APP_PROXY_URL;
+
+  useEffect(() => {
+    let mounted = true;
+    fetch(`${PROXY_URL}/api/csv-data`)
+      .then(res => {
+        if (!res.ok) throw new Error(`Failed to fetch CSV data: ${res.status}`);
+        return res.json();
+      })
+      .then(payload => {
+        if (!mounted) return;
+        // your state updates here...
+      })
+      .catch(err => {
+        console.error("Error loading CSV data:", err);
+      });
   
-
-  // Fetch CSV data from backend proxy on mount
-  // Fetch CSV data from backend proxy on mount
-useEffect(() => {
-  let mounted = true;
-  fetch(CSV_DATA_URL)
-    .then(res => {
-      if (!res.ok) throw new Error(`Failed to fetch CSV data: ${res.status}`);
-      return res.json();
-    })
-    .then(payload => {
-      if (!mounted) return;
-
+    return () => {
+      mounted = false;
+    };
+  }, []);
+  
       // Accept multiple payload shapes for compatibility with different proxies:
       // 1) an array of rows (old frontend expectation)
       // 2) an object { rows: number, data: [...] } (proxy.cjs current shape)
@@ -670,7 +678,7 @@ useEffect(() => {
                     onChange={handleInputChange}
                     suggestions={clientReferences}
                     placeholder="Client reference will auto-fill or type to search..."
-                    required
+                
                     label="Client Reference"
                   />
                 </div>
