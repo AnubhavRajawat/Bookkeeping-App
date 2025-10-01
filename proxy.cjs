@@ -2,46 +2,68 @@
 // Run: node proxy.cjs
 // CommonJS (require) because file is .cjs
 
+// ----------------------
+// Required modules (order matters)
+// ----------------------
+const path = require('path');
 const express = require('express');
 const fetch = require('node-fetch'); // v2
 const fs = require('fs');
-const path = require('path');
 const Papa = require('papaparse');
 const morgan = require('morgan'); // optional but helpful; npm i morgan
 const cors = require('cors');
+const multer = require('multer');
 
+// ----------------------
+// Config / env
+// ----------------------
 const app = express();
-
-// Config via env
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
-const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'uploads', 'master.csv'); // default
+const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'uploads', 'master.csv'); // default local path
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || 'https://script.google.com/macros/s/AKfycbzFLKP9Tji3waC4xaYrbuhEllDaM5jT5yJjlKbDl18VhFpDRTxtQIgOLpO7X8bxFw2Z/exec';
+const UPLOAD_SECRET = process.env.UPLOAD_SECRET || 'localdevsecret';
+console.log('[proxy] EXPECTED UPLOAD_SECRET =', UPLOAD_SECRET); // set a strong secret in Render
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 
+// ----------------------
+// Multer (upload) setup
+// ----------------------
+const tmpDir = path.join(__dirname, 'uploads', 'tmp');
+if (!fs.existsSync(tmpDir)) {
+  try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) { /* ignore */ }
+}
+const upload = multer({ dest: tmpDir });
+
+// ----------------------
 // Middlewares
-app.use(express.json({ limit: '5mb' }));
+// ----------------------
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Use morgan if available for better request logging (install with npm i morgan)
+// morgan (optional)
 try {
   app.use(morgan('dev'));
 } catch (e) {
-  // ignore if morgan not installed
   console.log('[proxy] morgan not installed — running without detailed request logs. (npm i morgan for nicer logs)');
 }
 
-// CORS: allow all origins for dev; restrict in production
+// CORS headers (also allow x-upload-secret)
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+  res.setHeader('Access-Control-Allow-Origin', CORS_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-upload-secret');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
+// ----------------------
 // In-memory parsed CSV
+// ----------------------
 let csvData = [];
 
-// Load CSV helper
+// ----------------------
+// CSV loader helper
+// ----------------------
 function loadCsvFromDisk() {
   try {
     if (!fs.existsSync(CSV_PATH)) {
@@ -57,8 +79,8 @@ function loadCsvFromDisk() {
     });
 
     if (parsed.errors && parsed.errors.length > 0) {
-      console.warn('[proxy] CSV parse errors/warnings (first 5):', parsed.errors.slice(0, 5));
-      // we continue and set parsed.data if available
+      console.warn('[proxy] CSV parse warnings (first 5):', parsed.errors.slice(0, 5));
+      // continue if data exists
     }
 
     csvData = parsed.data || [];
@@ -67,44 +89,43 @@ function loadCsvFromDisk() {
   } catch (err) {
     console.error('[proxy] Failed to load CSV:', err);
     csvData = [];
-    return { ok: false, message: err.message };
+    return { ok: false, message: err.message || String(err) };
   }
 }
 
-// Initial load
+// initial load
 loadCsvFromDisk();
 
-// Watch for SIGHUP to reload CSV without restarting (optional)
+// allow reload via SIGHUP
 process.on('SIGHUP', () => {
   console.log('[proxy] Received SIGHUP - reloading CSV from disk...');
   loadCsvFromDisk();
 });
 
+// ----------------------
 // Routes
+// ----------------------
 
 // Health
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString(), csvRows: csvData.length });
 });
 
-// Serve parsed CSV as JSON to frontend
+// CSV JSON
 app.get('/api/csv-data', (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  // No cache for dev
   res.setHeader('Cache-Control', 'no-store, max-age=0');
   res.json({ rows: csvData.length, data: csvData });
 });
 
-// Serve raw CSV for direct download / CSV parsers in-browser
+// Raw CSV
 app.get('/proxy/editor.csv', (req, res) => {
   if (!fs.existsSync(CSV_PATH)) {
     return res.status(404).send(`CSV not found at ${CSV_PATH}`);
   }
-
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'inline; filename=editor.csv'); // or attachment
+  res.setHeader('Content-Disposition', 'inline; filename=editor.csv');
   res.setHeader('Cache-Control', 'no-store, max-age=0');
-
   const stream = fs.createReadStream(CSV_PATH);
   stream.on('error', (err) => {
     console.error('[proxy] Error streaming CSV:', err);
@@ -113,34 +134,33 @@ app.get('/proxy/editor.csv', (req, res) => {
   stream.pipe(res);
 });
 
-// Static directory listing for quick inspection: /proxy/files/*
+// Static listing for folder containing CSV
 app.use('/proxy/files', express.static(path.dirname(CSV_PATH), {
   index: false,
   extensions: ['csv', 'txt', 'json'],
 }));
 
-// Manual reload endpoint
+// Manual reload
 app.get('/api/reload-csv', (req, res) => {
   const result = loadCsvFromDisk();
   if (result.ok) return res.json({ success: true, rows: result.rows });
   return res.status(500).json({ success: false, error: result.message || 'Failed to reload CSV' });
 });
 
-// Proxy to Apps Script for form submissions
+// Proxy to Apps Script
 app.post('/api/bookkeeping', async (req, res) => {
   if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes('YOUR_DEPLOYMENT_ID_HERE')) {
     return res.status(500).json({ proxied: false, error: 'APPS_SCRIPT_URL not configured in env' });
   }
 
   try {
-    console.log('[proxy] Forwarding payload to Apps Script — keys:', Object.keys(req.body).slice(0, 10));
+    console.log('[proxy] Forwarding payload to Apps Script — keys:', Object.keys(req.body || {}).slice(0, 10));
     const upstream = await fetch(APPS_SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body),
     });
 
-    // Try to parse JSON; fallback to text
     let appsResp;
     try {
       appsResp = await upstream.json();
@@ -151,11 +171,11 @@ app.post('/api/bookkeeping', async (req, res) => {
     res.status(200).json({ proxied: true, appsScriptResponse: appsResp });
   } catch (err) {
     console.error('[proxy] Error forwarding to Apps Script:', err);
-    res.status(500).json({ proxied: false, error: err.message });
+    res.status(500).json({ proxied: false, error: err.message || String(err) });
   }
 });
 
-// Root UI / quick links
+// Root UI
 app.get('/', (req, res) => {
   res.send(`
     <h3>Local proxy</h3>
@@ -171,7 +191,56 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Start
+// ----------------------
+// Upload CSV endpoint (protected)
+// ----------------------
+app.post('/api/upload-csv', upload.single('file'), async (req, res) => {
+  try {
+    const incomingSecret = req.get('x-upload-secret') || req.body.upload_secret || req.query.upload_secret;
+    if (!incomingSecret || incomingSecret !== UPLOAD_SECRET) {
+      if (req.file && fs.existsSync(req.file.path)) try { fs.unlinkSync(req.file.path); } catch(e){/*ignore*/}
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'Missing file' });
+    }
+
+    const uploadsDir = path.join(__dirname, 'uploads');
+    if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+
+    const destPath = path.join(uploadsDir, 'master.csv');
+
+    // Replace existing file (atomic on same filesystem)
+    try {
+      fs.renameSync(req.file.path, destPath);
+    } catch (errRename) {
+      // fallback to copy+unlink in case rename across filesystems
+      fs.copyFileSync(req.file.path, destPath);
+      try { fs.unlinkSync(req.file.path); } catch (e) { /* ignore */ }
+    }
+
+    console.log('[proxy] CSV uploaded by client ->', destPath);
+
+    // reload CSV into memory
+    const r = loadCsvFromDisk();
+    if (r.ok) {
+      return res.json({ success: true, message: 'CSV uploaded and reloaded', rows: r.rows });
+    } else {
+      return res.status(500).json({ success: false, message: 'Uploaded but reload failed', error: r.message });
+    }
+  } catch (err) {
+    console.error('[proxy] Error during upload-csv:', err);
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (e) { /* ignore */ }
+    }
+    return res.status(500).json({ success: false, error: err.message || String(err) });
+  }
+});
+
+// ----------------------
+// Start server
+// ----------------------
 app.listen(PORT, () => {
   console.log(`✅ Proxy listening on http://localhost:${PORT}`);
   console.log(`   Raw CSV: http://localhost:${PORT}/proxy/editor.csv`);
