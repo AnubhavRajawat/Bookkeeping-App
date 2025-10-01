@@ -452,11 +452,14 @@ fetch(url)
     console.log('Submitting data to Google Sheets (via proxy):', submissionData);
 
     try {
-      const response = await fetch(GOOGLE_APPS_SCRIPT_URL, {
+      const PROXY_URL = import.meta.env.VITE_PROXY_URL || 'https://bookkeeping-app-rmvi.onrender.com';
+
+      const response = await fetch(`${PROXY_URL}/api/bookkeeping`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(submissionData)
       });
+      
 
       let result = null;
       try {
