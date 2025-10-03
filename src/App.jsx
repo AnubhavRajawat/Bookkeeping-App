@@ -343,8 +343,8 @@ fetch(url)
   })
   .then(payload => {
     if (!mounted) return;
-
-    // Accept multiple payload shapes for compatibility with different proxies:
+  
+    // 1) Normalize the payload shape (accept array or wrapper objects)
     let rows = [];
     if (Array.isArray(payload)) {
       rows = payload;
@@ -352,59 +352,136 @@ fetch(url)
       rows = payload.data;
     } else if (payload && Array.isArray(payload.rows)) {
       rows = payload.rows;
+    } else if (payload && Array.isArray(payload.rows || payload.data || payload)) {
+      // fallback - attempt to coerce
+      rows = payload.rows || payload.data || payload;
     } else {
+      console.warn('CSV payload unrecognized shape:', payload);
       setCsvLoaded(false);
       setCsvError('No CSV rows found in response');
-      console.info('CSV data empty or not an array. Payload:', payload);
       return;
     }
-
+  
     if (!Array.isArray(rows) || rows.length === 0) {
       setCsvLoaded(false);
       setCsvError('no rows in CSV');
-      console.info('CSV data empty or not an array.');
+      console.info('CSV data empty or not an array. Payload:', payload);
       return;
     }
-
-    // ✅ success: set your state here
-    setCsvLoaded(true);
-    setCsvError(null);
-    setCsvRows(rows);
-
-    // ----- Fix B: populate autocomplete/dropdown lists from rows -----
-    // Helper to safely read column with multiple possible header names
-    const getValue = (row, keys) => {
-      for (const k of keys) {
-        if (Object.prototype.hasOwnProperty.call(row, k) && row[k] != null) {
-          return String(row[k]).trim();
-        }
+  
+    // Helpful debug: show first 3 rows and header keys in console so you can inspect
+    console.info('CSV rows loaded (sample 3):', rows.slice(0, 3));
+    const headers = Object.keys(rows[0] || {});
+    console.info('CSV headers detected:', headers);
+  
+    // Helper: normalize header strings for fuzzy matching
+    const normalize = (s) => (s || '').toString().toLowerCase().replace(/[^a-z0-9]/g, '');
+  
+    // helper to find actual header name from a set of candidate variants
+    const findHeaderKey = (headersList = [], variants = []) => {
+      if (!headersList || headersList.length === 0) return null;
+      const H = headersList.map(h => ({ raw: h, norm: normalize(h) }));
+      for (const v of variants) {
+        const vn = normalize(v);
+        const hit = H.find(x => x.norm === vn);
+        if (hit) return hit.raw;
       }
-      return '';
+      // partial containment match (e.g. "companyno" vs "company_number")
+      for (const v of variants) {
+        const vn = normalize(v);
+        const hit = H.find(x => x.norm.includes(vn) || vn.includes(x.norm));
+        if (hit) return hit.raw;
+      }
+      return null;
     };
-
-    // Provide common header name fallbacks — update these to match your CSV if needed
-    const colCompanyName = ['Company Name', 'company_name', 'companyName', 'Company'];
-    const colCompanyNumber = ['Company Number', 'company_number', 'companyNumber', 'Company No'];
-    const colClientRef = ['Client Reference', 'client_reference', 'ClientRef', 'Client'];
-    const colFileName = ['File Source', 'file', 'filename', 'File Name'];
-    const colBookkeeper = ['Bookkeeper', 'bookkeeper', 'Assigned To'];
-    const colReviewer = ['Reviewer', 'reviewer', 'Reviewed By'];
-
-    const names = [...new Set(rows.map(r => getValue(r, colCompanyName)).filter(Boolean))];
-    const numbers = [...new Set(rows.map(r => getValue(r, colCompanyNumber)).filter(Boolean))];
-    const clients = [...new Set(rows.map(r => getValue(r, colClientRef)).filter(Boolean))];
-    const files = [...new Set(rows.map(r => getValue(r, colFileName)).filter(Boolean))];
-    const keepers = [...new Set(rows.map(r => getValue(r, colBookkeeper)).filter(Boolean))];
-    const reviewersList = [...new Set(rows.map(r => getValue(r, colReviewer)).filter(Boolean))];
-
+  
+    // Column candidate names (expand these to match your CSV)
+    const colCompanyName = ['Company Name', 'company_name', 'companyName', 'Company', 'company'];
+    const colCompanyNumber = ['Company Number', 'company_number', 'companyNumber', 'Company No', 'companyno', 'company'];
+    const colClientRef = ['Client Reference', 'client_reference', 'ClientRef', 'Client', 'client'];
+    const colFileName = ['File Source', 'file', 'filename', 'File Name', 'fileName', 'Source'];
+    const colBookkeeper = ['Bookkeeper', 'bookkeeper', 'Assigned To', 'assigned_to'];
+    const colReviewer = ['Reviewer', 'reviewer', 'Reviewed By', 'reviewed_by'];
+    const colCompanyUTR = ['UTR', 'company_utr', 'companyUTR', 'utr'];
+  
+    // Resolve actual header keys present in the CSV
+    const keyCompanyNumber = findHeaderKey(headers, colCompanyNumber);
+    const keyCompanyName = findHeaderKey(headers, colCompanyName);
+    const keyClientRef = findHeaderKey(headers, colClientRef);
+    const keyFileName = findHeaderKey(headers, colFileName);
+    const keyBookkeeper = findHeaderKey(headers, colBookkeeper);
+    const keyReviewer = findHeaderKey(headers, colReviewer);
+    const keyCompanyUTR = findHeaderKey(headers, colCompanyUTR);
+  
+    console.info('Mapped CSV keys:', {
+      keyCompanyNumber, keyCompanyName, keyClientRef, keyFileName, keyBookkeeper, keyReviewer, keyCompanyUTR
+    });
+  
+    // Utility to safely read a row value with fallback
+    const safeGet = (row, key) => {
+      if (!key || !row) return '';
+      const v = row[key];
+      if (v === null || v === undefined) return '';
+      return String(v).trim();
+    };
+  
+    // Build unique lists and company data map
+    const namesSet = new Set();
+    const numbersSet = new Set();
+    const clientsSet = new Set();
+    const filesSet = new Set();
+    const keepersSet = new Set();
+    const reviewersSet = new Set();
+    const map = new Map();
+  
+    rows.forEach(r => {
+      const cNo = safeGet(r, keyCompanyNumber);
+      const cName = safeGet(r, keyCompanyName);
+      const clientRef = safeGet(r, keyClientRef);
+      const fileN = safeGet(r, keyFileName);
+      const keeper = safeGet(r, keyBookkeeper);
+      const reviewer = safeGet(r, keyReviewer);
+      const utr = safeGet(r, keyCompanyUTR);
+  
+      if (cNo) numbersSet.add(cNo);
+      if (cName) namesSet.add(cName);
+      if (clientRef) clientsSet.add(clientRef);
+      if (fileN) filesSet.add(fileN);
+      if (keeper) keepersSet.add(keeper);
+      if (reviewer) reviewersSet.add(reviewer);
+  
+      if (cNo) {
+        const entry = map.get(cNo) || {};
+        entry.companyName = entry.companyName || cName || '';
+        entry.companyUTR = entry.companyUTR || utr || '';
+        entry.clientReference = entry.clientReference || clientRef || '';
+        entry.fileName = entry.fileName || fileN || '';
+        entry.bookkeeper = entry.bookkeeper || keeper || '';
+        entry.reviewer = entry.reviewer || reviewer || '';
+        map.set(cNo, entry);
+      }
+    });
+  
+    const names = [...namesSet].filter(Boolean);
+    const numbers = [...numbersSet].filter(Boolean);
+    const clients = [...clientsSet].filter(Boolean);
+    const files = [...filesSet].filter(Boolean);
+    const keepers = [...keepersSet].filter(Boolean);
+    const reviewersList = [...reviewersSet].filter(Boolean);
+  
     setCompanyNames(names);
     setCompanyNumbers(numbers);
     setClientReferences(clients);
     setFileNames(files);
     setBookkeepers(keepers);
     setReviewers(reviewersList);
-    // ----------------------------------------------------------------
+    setCompanyDataMap(map);
+  
+    setCsvLoaded(true);
+    setCsvError(null);
+    setCsvRows(rows);
   })
+  
   .catch(err => {
     console.error("Error loading CSV from proxy:", err);
     setCsvLoaded(false);
