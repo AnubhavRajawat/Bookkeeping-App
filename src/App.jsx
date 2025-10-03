@@ -100,7 +100,17 @@ const AutocompleteInput = ({
           value={value || ""}
           onChange={onChange}
           onKeyDown={handleKeyDown}
-          onFocus={() => value && value.length > 0 && setShowSuggestions(filteredSuggestions.length > 0)}
+          onFocus={() => {
+            if (value && value.length > 0) {
+              setShowSuggestions(filteredSuggestions.length > 0);
+            } else {
+              const top = suggestions ? suggestions.slice(0, 50) : [];
+              setFilteredSuggestions(top);
+              setShowSuggestions(top.length > 0);
+              setActiveSuggestion(-1);
+            }
+          }}
+          
           onBlur={handleBlur}
           placeholder={placeholder}
           required={required}
@@ -209,7 +219,9 @@ const BookkeepingForm = () => {
     bookkeeper: '',
     reviewer: '',
     fileType: '',
-    period: '',
+    period: '',       // old string (will now be auto-filled)
+    periodStart: '',  // new: start date
+    periodEnd: '',    // new: end date  
     workDone: '',
 
     // Bank related
@@ -238,7 +250,7 @@ const BookkeepingForm = () => {
   const [submitStatus, setSubmitStatus] = useState({ type: '', message: '' });
   const [showSetupInstructions, setShowSetupInstructions] = useState(false);
 
-  // CSV/autocomplete lists / maps (populated from backend CSV)
+// CSV/autocomplete lists / maps (populated from backend CSV)
 const [csvLoaded, setCsvLoaded] = useState(false);
 const [csvError, setCsvError] = useState('');
 const [csvRows, setCsvRows] = useState([]);   // ✅ add this
@@ -249,6 +261,11 @@ const [fileNames, setFileNames] = useState([]);
 const [bookkeepers, setBookkeepers] = useState([]);
 const [reviewers, setReviewers] = useState([]);
 const [companyDataMap, setCompanyDataMap] = useState(new Map());
+
+// ✅ add these two new state hooks
+const [responsibleUsers, setResponsibleUsers] = useState([]);
+const [fileAllocatedList, setFileAllocatedList] = useState([]);
+
 
   // init serial + month
   useEffect(() => {
@@ -285,23 +302,40 @@ const [companyDataMap, setCompanyDataMap] = useState(new Map());
     const { name, value, type, checked } = e.target;
     setFormData(prev => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
   };
-
-  // When user picks company number, auto-fill companyName, companyUTR, clientReference, bookkeeper
-  const handleCompanyNumberSelect = (companyNo) => {
-    const data = companyDataMap.get(companyNo);
-    if (data) {
-      setFormData(prev => ({
-        ...prev,
-        companyNo,
-        companyName: data.companyName || prev.companyName,
-        companyUTR: data.companyUTR || prev.companyUTR,
-        clientReference: data.clientReference || prev.clientReference,
-        bookkeeper: prev.bookkeeper || data.bookkeeper || prev.bookkeeper
-      }));
-    } else {
-      setFormData(prev => ({ ...prev, companyNo }));
-    }
+// Special handling for Period range (two dates -> formatted string)
+if (name === 'periodStart' || name === 'periodEnd') {
+  const newData = { ...formData, [name]: value };
+  const formatDate = (d) => {
+    if (!d) return '';
+    const date = new Date(d);
+    return `${String(date.getDate()).padStart(2,'0')}/${String(date.getMonth()+1).padStart(2,'0')}/${date.getFullYear()}`;
   };
+  const start = formatDate(newData.periodStart);
+  const end   = formatDate(newData.periodEnd);
+  newData.period = (start && end) ? `${start} - ${end}` : '';
+  setFormData(newData);
+  return; // stop here, don’t run the generic handler
+}
+  // When user picks company number, auto-fill fields (including bookkeeper & file allocated)
+const handleCompanyNumberSelect = (companyNo) => {
+  const data = companyDataMap.get(companyNo);
+  if (data) {
+    const companyName = data.companyName || '';
+    setFormData(prev => ({
+      ...prev,
+      companyNo,
+      companyName: companyName || prev.companyName,
+      companyUTR: data.companyUTR || prev.companyUTR,
+      clientReference: data.clientReference || prev.clientReference,
+      bookkeeper: data.bookkeeper || prev.bookkeeper || '',
+      fileAllocatedTo: data.fileAllocatedTo || prev.fileAllocatedTo || '',
+      fileName: companyName || prev.fileName || '' // keep fileName same as company name if desired
+    }));
+  } else {
+    setFormData(prev => ({ ...prev, companyNo }));
+  }
+};
+
 
   // Validate required fields
   const validateForm = () => {
@@ -327,170 +361,216 @@ const [companyDataMap, setCompanyDataMap] = useState(new Map());
   
 
   // Fetch CSV data from backend proxy on mount
-  useEffect(() => {
-    let mounted = true;
-  
-    // inside useEffect
-const PROXY_URL = import.meta.env.VITE_PROXY_URL || 'https://bookkeeping-app-rmvi.onrender.com';
-const url = `${PROXY_URL}/api/csv-data`;
+useEffect(() => {
+  let mounted = true;
 
-console.log("Fetching CSV from:", url);
+  const PROXY_URL = import.meta.env.VITE_PROXY_URL || import.meta.env.REACT_APP_PROXY_URL || 'https://bookkeeping-app-rmvi.onrender.com';
+  const url = `${PROXY_URL}/api/csv-data`;
 
-fetch(url)
-  .then(res => {
-    if (!res.ok) throw new Error(`Failed to fetch CSV data: ${res.status}`);
-    return res.json();
-  })
-  .then(payload => {
-    if (!mounted) return;
-  
-    // 1) Normalize the payload shape (accept array or wrapper objects)
-    let rows = [];
-    if (Array.isArray(payload)) {
-      rows = payload;
-    } else if (payload && Array.isArray(payload.data)) {
-      rows = payload.data;
-    } else if (payload && Array.isArray(payload.rows)) {
-      rows = payload.rows;
-    } else if (payload && Array.isArray(payload.rows || payload.data || payload)) {
-      // fallback - attempt to coerce
-      rows = payload.rows || payload.data || payload;
-    } else {
-      console.warn('CSV payload unrecognized shape:', payload);
-      setCsvLoaded(false);
-      setCsvError('No CSV rows found in response');
-      return;
-    }
-  
-    if (!Array.isArray(rows) || rows.length === 0) {
-      setCsvLoaded(false);
-      setCsvError('no rows in CSV');
-      console.info('CSV data empty or not an array. Payload:', payload);
-      return;
-    }
-  
-    // Helpful debug: show first 3 rows and header keys in console so you can inspect
-    console.info('CSV rows loaded (sample 3):', rows.slice(0, 3));
-    const headers = Object.keys(rows[0] || {});
-    console.info('CSV headers detected:', headers);
-  
-    // Helper: normalize header strings for fuzzy matching
-    const normalize = (s) => (s || '').toString().toLowerCase().replace(/[^a-z0-9]/g, '');
-  
-    // helper to find actual header name from a set of candidate variants
-    const findHeaderKey = (headersList = [], variants = []) => {
-      if (!headersList || headersList.length === 0) return null;
-      const H = headersList.map(h => ({ raw: h, norm: normalize(h) }));
-      for (const v of variants) {
-        const vn = normalize(v);
-        const hit = H.find(x => x.norm === vn);
-        if (hit) return hit.raw;
+  console.info("Fetching CSV from:", url);
+
+  fetch(url)
+    .then(res => {
+      if (!res.ok) throw new Error(`Failed to fetch CSV data: ${res.status}`);
+      return res.json();
+    })
+    .then(payload => {
+      if (!mounted) return;
+
+      // Normalize payload shape (accept array or wrapper objects)
+      let rows = [];
+      if (Array.isArray(payload)) rows = payload;
+      else if (payload && Array.isArray(payload.data)) rows = payload.data;
+      else if (payload && Array.isArray(payload.rows)) rows = payload.rows;
+      else if (payload && Array.isArray(payload.rows || payload.data || payload)) rows = payload.rows || payload.data || payload;
+      else {
+        console.warn('CSV payload unrecognized shape:', payload);
+        setCsvLoaded(false);
+        setCsvError('No CSV rows found in response');
+        return;
       }
-      // partial containment match (e.g. "companyno" vs "company_number")
-      for (const v of variants) {
-        const vn = normalize(v);
-        const hit = H.find(x => x.norm.includes(vn) || vn.includes(x.norm));
-        if (hit) return hit.raw;
+
+      if (!Array.isArray(rows) || rows.length === 0) {
+        setCsvLoaded(false);
+        setCsvError('no rows in CSV');
+        console.info('CSV data empty or not an array. Payload:', payload);
+        return;
       }
-      return null;
-    };
-  
-    // Column candidate names (expand these to match your CSV)
-    const colCompanyName = ['Company Name', 'company_name', 'companyName', 'Company', 'company'];
-    const colCompanyNumber = ['Company Number', 'company_number', 'companyNumber', 'Company No', 'companyno', 'company'];
-    const colClientRef = ['Client Reference', 'client_reference', 'ClientRef', 'Client', 'client'];
-    const colFileName = ['File Source', 'file', 'filename', 'File Name', 'fileName', 'Source'];
-    const colBookkeeper = ['Bookkeeper', 'bookkeeper', 'Assigned To', 'assigned_to'];
-    const colReviewer = ['Reviewer', 'reviewer', 'Reviewed By', 'reviewed_by'];
-    const colCompanyUTR = ['UTR', 'company_utr', 'companyUTR', 'utr'];
-  
-    // Resolve actual header keys present in the CSV
-    const keyCompanyNumber = findHeaderKey(headers, colCompanyNumber);
-    const keyCompanyName = findHeaderKey(headers, colCompanyName);
-    const keyClientRef = findHeaderKey(headers, colClientRef);
-    const keyFileName = findHeaderKey(headers, colFileName);
-    const keyBookkeeper = findHeaderKey(headers, colBookkeeper);
-    const keyReviewer = findHeaderKey(headers, colReviewer);
-    const keyCompanyUTR = findHeaderKey(headers, colCompanyUTR);
-  
-    console.info('Mapped CSV keys:', {
-      keyCompanyNumber, keyCompanyName, keyClientRef, keyFileName, keyBookkeeper, keyReviewer, keyCompanyUTR
+
+      // Debug: sample and headers
+      console.info('CSV rows loaded (sample 3):', rows.slice(0, 3));
+      const headers = Object.keys(rows[0] || {});
+      console.info('CSV headers detected:', headers);
+
+      // helpers
+      const nrm = s => (s || '').toString().toLowerCase().replace(/[^a-z0-9]/g, '');
+      const findHeaderKey = (headersList = [], variants = []) => {
+        if (!headersList || headersList.length === 0) return null;
+        const H = headersList.map(h => ({ raw: h, norm: nrm(h) }));
+        for (const v of variants) {
+          const vn = nrm(v);
+          const hit = H.find(x => x.norm === vn);
+          if (hit) return hit.raw;
+        }
+        for (const v of variants) {
+          const vn = nrm(v);
+          const hit = H.find(x => x.norm.includes(vn) || vn.includes(x.norm));
+          if (hit) return hit.raw;
+        }
+        return null;
+      };
+      const safeGet = (row, key) => {
+        if (!key || !row) return '';
+        const v = row[key];
+        return (v === null || v === undefined) ? '' : String(v).trim();
+      };
+
+      // candidate header names
+      const colCompanyName   = ['Company Name','company_name','companyName','Company','company'];
+      const colCompanyNumber = ['Company Number','company_number','companyNumber','Company No','companyno'];
+      const colClientRef     = ['Client Reference','client_reference','ClientRef','Client','client'];
+      const colFileName      = ['File Source','file','filename','File Name','fileName','Source','File'];
+      const colBookkeeper    = [
+        'Bookkeeper','bookkeeper','Bookeeper','Assigned To','assigned_to','AssignedTo','Assigned','assigned',
+        'Assigned User','assigned_user','owner','owner_name','book_keeper','bookkeeper_name','bookkeepername'
+      ];
+      const colReviewer      = ['Reviewer','reviewer','Reviewed By','reviewed_by'];
+      const colCompanyUTR    = ['UTR','company_utr','companyUTR','utr'];
+      const colResponsible   = ['Responsible User','responsible_user','responsibleUser','Responsible','responsible'];
+      const colFileAllocated = ['File Allocated To','file_allocated_to','fileAllocatedTo','Allocated To','fileAllocated'];
+
+      // primary key resolution
+      let keyCompanyNumber = findHeaderKey(headers, colCompanyNumber);
+      let keyCompanyName   = findHeaderKey(headers, colCompanyName);
+      const keyClientRef   = findHeaderKey(headers, colClientRef);
+      let keyFileName      = findHeaderKey(headers, colFileName);
+      let keyBookkeeper    = findHeaderKey(headers, colBookkeeper);
+      const keyReviewer    = findHeaderKey(headers, colReviewer);
+      const keyCompanyUTR  = findHeaderKey(headers, colCompanyUTR);
+      let keyResponsible   = findHeaderKey(headers, colResponsible);
+      let keyFileAllocated = findHeaderKey(headers, colFileAllocated);
+
+      // if fileName not present, fallback to companyName mapping (we want fileName == companyName)
+      if (!keyFileName && keyCompanyName) {
+        keyFileName = keyCompanyName;
+      }
+
+      // Disambiguate company number/name collision
+      if (keyCompanyNumber && keyCompanyName && keyCompanyNumber === keyCompanyName) {
+        const headerNorm = nrm(keyCompanyNumber);
+        const looksLikeNumber = /no\b|number|\bnum\b|companyno|company_number/.test(headerNorm);
+        if (looksLikeNumber) {
+          const altName = headers.find(h => /name/i.test(h) && h !== keyCompanyNumber);
+          if (altName) keyCompanyName = altName; else keyCompanyName = null;
+        } else {
+          const altNo = headers.find(h => /\bno\b|number|num|companyno|company_number/i.test(h) && h !== keyCompanyNumber);
+          if (altNo) keyCompanyNumber = altNo; else keyCompanyNumber = null;
+        }
+      }
+
+      // If bookkeeper key not found, try heuristic: any header that contains 'book', 'assign', 'owner'
+      if (!keyBookkeeper) {
+        const fallback = headers.find(h => /(book|assign|owner)/i.test(h));
+        if (fallback) keyBookkeeper = fallback;
+      }
+
+      console.info('Resolved CSV keys:', {
+        keyCompanyNumber, keyCompanyName, keyClientRef, keyFileName, keyBookkeeper, keyReviewer, keyCompanyUTR, keyResponsible, keyFileAllocated
+      });
+
+      // build sets and map
+      const namesSet = new Set();
+      const numbersSet = new Set();
+      const clientsSet = new Set();
+      const filesSet = new Set();
+      const keepersSet = new Set();
+      const reviewersSet = new Set();
+      const responsibleSet = new Set();
+      const fileAllocatedSet = new Set();
+      const map = new Map();
+
+      rows.forEach(r => {
+        const cNo     = safeGet(r, keyCompanyNumber);
+        const cName   = safeGet(r, keyCompanyName);
+        const client  = safeGet(r, keyClientRef);
+        const fileN   = safeGet(r, keyFileName);
+        const keeper  = safeGet(r, keyBookkeeper);
+        const reviewer= safeGet(r, keyReviewer);
+        const utr     = safeGet(r, keyCompanyUTR);
+        const resp    = safeGet(r, keyResponsible);
+        const alloc   = safeGet(r, keyFileAllocated);
+
+        if (cName) namesSet.add(cName);
+        if (cNo) numbersSet.add(cNo);
+        if (client) clientsSet.add(client);
+        if (fileN) filesSet.add(fileN);
+        if (keeper) keepersSet.add(keeper);
+        if (reviewer) reviewersSet.add(reviewer);
+        if (resp) responsibleSet.add(resp);
+        if (alloc) fileAllocatedSet.add(alloc);
+
+        if (cNo) {
+          const entry = map.get(cNo) || {};
+          entry.companyName     = entry.companyName     || cName   || '';
+          entry.companyUTR      = entry.companyUTR      || utr     || '';
+          entry.clientReference = entry.clientReference || client  || '';
+          entry.fileName        = entry.fileName        || fileN   || cName || '';
+          entry.bookkeeper      = entry.bookkeeper      || keeper  || '';
+          entry.reviewer        = entry.reviewer        || reviewer|| '';
+          entry.responsibleUser = entry.responsibleUser || resp    || '';
+          entry.fileAllocatedTo = entry.fileAllocatedTo || alloc   || '';
+          map.set(cNo, entry);
+        }
+      });
+
+      // If keepersSet ended up empty, attempt to extract bookkeepers by scanning row values for likely bookkeeper columns
+      if (keepersSet.size === 0) {
+        rows.forEach(r => {
+          for (const k of Object.keys(r)) {
+            const kn = nrm(k);
+            if (/(book|keeper|assigned|owner)/.test(kn)) {
+              const v = safeGet(r, k);
+              if (v) keepersSet.add(v);
+            }
+          }
+        });
+      }
+
+      // Make companyNames -> fileNames mirror (explicit requirement)
+      const companyNamesArr = [...namesSet].filter(Boolean).sort();
+      setCompanyNames(companyNamesArr);
+      setFileNames(companyNamesArr); // fileName == companyName
+
+      // Commit bookkeepers etc (unique + sorted)
+      setCompanyNumbers([...numbersSet].filter(Boolean).sort());
+      setClientReferences([...clientsSet].filter(Boolean).sort());
+      setBookkeepers([...keepersSet].filter(Boolean).sort());
+      setReviewers([...reviewersSet].filter(Boolean).sort());
+      setResponsibleUsers([...responsibleSet].filter(Boolean).sort());
+      setFileAllocatedList([...fileAllocatedSet].filter(Boolean).sort());
+      setCompanyDataMap(map);
+
+      // debug
+      console.debug('CSV dropdown samples:', {
+        companyNames: companyNamesArr.slice(0,10),
+        bookkeepers: [...keepersSet].slice(0,20)
+      });
+
+      setCsvRows(rows);
+      setCsvLoaded(true);
+      setCsvError(null);
+    })
+    .catch(err => {
+      console.error("Error loading CSV from proxy:", err);
+      if (mounted) {
+        setCsvLoaded(false);
+        setCsvError(err.message || String(err));
+      }
     });
-  
-    // Utility to safely read a row value with fallback
-    const safeGet = (row, key) => {
-      if (!key || !row) return '';
-      const v = row[key];
-      if (v === null || v === undefined) return '';
-      return String(v).trim();
-    };
-  
-    // Build unique lists and company data map
-    const namesSet = new Set();
-    const numbersSet = new Set();
-    const clientsSet = new Set();
-    const filesSet = new Set();
-    const keepersSet = new Set();
-    const reviewersSet = new Set();
-    const map = new Map();
-  
-    rows.forEach(r => {
-      const cNo = safeGet(r, keyCompanyNumber);
-      const cName = safeGet(r, keyCompanyName);
-      const clientRef = safeGet(r, keyClientRef);
-      const fileN = safeGet(r, keyFileName);
-      const keeper = safeGet(r, keyBookkeeper);
-      const reviewer = safeGet(r, keyReviewer);
-      const utr = safeGet(r, keyCompanyUTR);
-  
-      if (cNo) numbersSet.add(cNo);
-      if (cName) namesSet.add(cName);
-      if (clientRef) clientsSet.add(clientRef);
-      if (fileN) filesSet.add(fileN);
-      if (keeper) keepersSet.add(keeper);
-      if (reviewer) reviewersSet.add(reviewer);
-  
-      if (cNo) {
-        const entry = map.get(cNo) || {};
-        entry.companyName = entry.companyName || cName || '';
-        entry.companyUTR = entry.companyUTR || utr || '';
-        entry.clientReference = entry.clientReference || clientRef || '';
-        entry.fileName = entry.fileName || fileN || '';
-        entry.bookkeeper = entry.bookkeeper || keeper || '';
-        entry.reviewer = entry.reviewer || reviewer || '';
-        map.set(cNo, entry);
-      }
-    });
-  
-    const names = [...namesSet].filter(Boolean);
-    const numbers = [...numbersSet].filter(Boolean);
-    const clients = [...clientsSet].filter(Boolean);
-    const files = [...filesSet].filter(Boolean);
-    const keepers = [...keepersSet].filter(Boolean);
-    const reviewersList = [...reviewersSet].filter(Boolean);
-  
-    setCompanyNames(names);
-    setCompanyNumbers(numbers);
-    setClientReferences(clients);
-    setFileNames(files);
-    setBookkeepers(keepers);
-    setReviewers(reviewersList);
-    setCompanyDataMap(map);
-  
-    setCsvLoaded(true);
-    setCsvError(null);
-    setCsvRows(rows);
-  })
-  
-  .catch(err => {
-    console.error("Error loading CSV from proxy:", err);
-    setCsvLoaded(false);
-    setCsvError(err.message || String(err));
-  });
 
-  
-    return () => { mounted = false; };
-  }, []);
+  return () => { mounted = false; };
+}, []);
+
   
 
   // Submit handler
@@ -775,20 +855,25 @@ fetch(url)
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                  <div>
-                    <label style={{ display: 'block', fontSize: 14, fontWeight: 500, color: '#374151', marginBottom: 8 }}>Responsible User</label>
-                    <input type="text" name="responsibleUser" value={formData.responsibleUser} onChange={handleInputChange} style={{ width: '100%', padding: '12px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
-                  </div>
+                <AutocompleteInput
+  name="responsibleUser"
+  value={formData.responsibleUser}
+  onChange={handleInputChange}
+  suggestions={responsibleUsers}
+  placeholder="Type to search responsible users..."
+  label="Responsible User"
+/>
 
-                  <AutocompleteInput
-                    name="fileName"
-                    value={formData.fileName}
-                    onChange={handleInputChange}
-                    suggestions={fileNames}
-                    placeholder="Type to search file names..."
-                    required
-                    label="File Name"
-                  />
+
+<AutocompleteInput
+  name="fileName"
+  value={formData.fileName}
+  onChange={handleInputChange}
+  suggestions={fileNames}   // 👈 same as companyNames now
+  placeholder="Type to search company/file name..."
+  label="File Name"
+  required
+/>
 
                   <div>
                     <label style={{ display: 'block', fontSize: 14, fontWeight: 500, color: '#374151', marginBottom: 8 }}>File Source</label>
@@ -842,15 +927,29 @@ fetch(url)
 
 <div>
   <label style={{ display: 'block', fontSize: 14, fontWeight: 500, color: '#374151', marginBottom: 8 }}>Period</label>
-  <input
-    type="text"
-    name="period"
-    value={formData.period}
-    onChange={handleInputChange}
-    placeholder="e.g. Jan 2023 - Dec 2023"
-    style={{ width: '100%', padding: '12px', border: '1px solid #d1d5db', borderRadius: '8px' }}
-  />
+  <div style={{ display: 'flex', gap: '12px' }}>
+    <input
+      type="date"
+      name="periodStart"
+      value={formData.periodStart}
+      onChange={handleInputChange}
+      style={{ flex: 1, padding: '12px', border: '1px solid #d1d5db', borderRadius: '8px' }}
+    />
+    <input
+      type="date"
+      name="periodEnd"
+      value={formData.periodEnd}
+      onChange={handleInputChange}
+      style={{ flex: 1, padding: '12px', border: '1px solid #d1d5db', borderRadius: '8px' }}
+    />
+  </div>
+  {formData.period && (
+    <div style={{ marginTop: 8, fontSize: 13, color: '#374151' }}>
+      Selected Period: <strong>{formData.period}</strong>
+    </div>
+  )}
 </div>
+
 
 <div>
   <label style={{ display: 'block', marginBottom: 8 }}>Work Done</label>
@@ -886,26 +985,39 @@ fetch(url)
   </div>
 
   <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
-    <div style={{ flex: '1 1 300px' }}>
-      <label style={{ display: 'block', marginBottom: 8 }}>File Allocated To</label>
-      <input
-        type="text"
-        name="fileAllocatedTo"
-        value={formData.fileAllocatedTo}
-        onChange={handleInputChange}
-        style={{ width: '100%', padding: 12, borderRadius: 8, border: '1px solid #d1d5db' }}
-      />
-    </div>
+  <div style={{ flex: '1 1 300px' }}>
+  <AutocompleteInput
+  name="fileAllocatedTo"
+  value={formData.fileAllocatedTo}
+  onChange={handleInputChange}
+  suggestions={
+    (fileAllocatedList && fileAllocatedList.length)
+      ? fileAllocatedList
+      : [...new Set(Array.from(companyDataMap.values()).map(v => v.fileAllocatedTo).filter(Boolean))].sort()
+  }
+  placeholder="Type to search allocation..."
+  label="File Allocated To"
+/>
+
+</div>
+
 
     <div style={{ flex: '1 1 300px' }}>
-      <AutocompleteInput
-        name="bookkeeper"
-        value={formData.bookkeeper}
-        onChange={handleInputChange}
-        suggestions={bookkeepers}
-        placeholder="Type to search bookkeepers..."
-        label="Bookkeeper"
-      />
+    <AutocompleteInput
+  name="bookkeeper"
+  value={formData.bookkeeper}
+  onChange={handleInputChange}
+  suggestions={
+    (bookkeepers && bookkeepers.length)
+      ? bookkeepers
+      : [...new Set(Array.from(companyDataMap.values()).map(v => v.bookkeeper).filter(Boolean))].sort()
+  }
+  placeholder="Type to search bookkeepers..."
+  label="Bookkeeper"
+/>
+
+
+
     </div>
 
     <div style={{ flex: '1 1 300px' }}>
