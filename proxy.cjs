@@ -1,5 +1,7 @@
 // proxy.cjs
-// Express proxy + CSV upload + CSV serve + forward to Apps Script
+// Express proxy + CSV upload + CSV serve + forward to Apps Script + Reminder router
+
+// ------------------ Imports ------------------
 const express = require('express');
 const fetch = require('node-fetch'); // v2
 const bodyParser = require('body-parser');
@@ -8,27 +10,31 @@ const fs = require('fs');
 const path = require('path');
 const Papa = require('papaparse');
 
+// NEW for reminder router dependencies
+const remindersRouter = require('./reminders'); // <-- make sure reminders.js is in same folder
+
+// ------------------ App Setup ------------------
 const app = express();
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Config from env
+// ------------------ Env Config ------------------
 const PORT = process.env.PORT || 10000;
-const TARGET_URL = process.env.TARGET_URL || process.env.APPS_SCRIPT_URL || ''; // prefer TARGET_URL, fallback to APPS_SCRIPT_URL
+const TARGET_URL = process.env.TARGET_URL || process.env.APPS_SCRIPT_URL || ''; // prefer TARGET_URL
 const UPLOAD_SECRET = process.env.UPLOAD_SECRET || process.env.UPLOAD_SECRET_KEY || 'super-secret';
 const allowedOriginsList = (process.env.CORS_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean);
 
-// ensure uploads dir
+// ------------------ Upload Setup ------------------
 const UPLOAD_DIR = path.resolve(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// multer setup: store as master.csv
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_DIR),
   filename: (req, file, cb) => cb(null, 'master.csv'),
 });
 const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB max
 
+// ------------------ CORS Helper ------------------
 function originAllowed(origin) {
   if (!origin) return false;
   if (allowedOriginsList.length && allowedOriginsList.includes(origin)) return true;
@@ -39,7 +45,7 @@ function originAllowed(origin) {
   return false;
 }
 
-// CORS middleware
+// ------------------ Global CORS Middleware ------------------
 app.use((req, res, next) => {
   const origin = req.get('Origin');
   if (origin && originAllowed(origin)) {
@@ -55,11 +61,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// Upload CSV endpoint (protected by x-upload-secret)
+// ------------------ Upload CSV Endpoint ------------------
 app.post('/api/upload-csv', upload.single('file'), (req, res) => {
   const secret = req.get('x-upload-secret') || '';
   if (!UPLOAD_SECRET || secret !== UPLOAD_SECRET) {
-    // remove uploaded file if present
     if (req.file && req.file.path) { try { fs.unlinkSync(req.file.path); } catch(e){} }
     return res.status(403).json({ error: 'Invalid upload secret' });
   }
@@ -67,12 +72,11 @@ app.post('/api/upload-csv', upload.single('file'), (req, res) => {
   return res.json({ ok: true, path: `/uploads/${req.file.filename}` });
 });
 
-// Helper: read & parse uploads/master.csv, return parsed array
+// ------------------ Helper: Read Master CSV ------------------
 function readCsvMaster() {
   const csvPath = path.join(UPLOAD_DIR, 'master.csv');
   if (!fs.existsSync(csvPath)) throw new Error('CSV not found');
   const raw = fs.readFileSync(csvPath, 'utf8');
-  // Papa.parse (node): header true to get objects
   const parsed = Papa.parse(raw, { header: true, skipEmptyLines: true });
   if (parsed.errors && parsed.errors.length) {
     throw new Error('CSV parse error: ' + JSON.stringify(parsed.errors));
@@ -80,7 +84,7 @@ function readCsvMaster() {
   return parsed.data;
 }
 
-// Serve CSV as JSON
+// ------------------ Serve CSV as JSON ------------------
 app.get('/api/csv-data', (req, res) => {
   try {
     const data = readCsvMaster();
@@ -90,7 +94,7 @@ app.get('/api/csv-data', (req, res) => {
   }
 });
 
-// Forward bookkeeping POSTs to Apps Script (TARGET_URL)
+// ------------------ Forward Bookkeeping POSTs ------------------
 app.post('/api/bookkeeping', async (req, res) => {
   const origin = req.get('Origin') || '';
   if (origin && !originAllowed(origin)) {
@@ -113,7 +117,7 @@ app.post('/api/bookkeeping', async (req, res) => {
     });
 
     const text = await r.text();
-    // ensure CORS header included
+
     if (origin && originAllowed(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
     res.status(r.status).send(text);
   } catch (err) {
@@ -123,9 +127,22 @@ app.post('/api/bookkeeping', async (req, res) => {
   }
 });
 
-app.get('/', (req, res) => res.send(`Proxy alive. Proxying to ${TARGET_URL || '<TARGET_URL not set>'}`));
+// ------------------ Mount Reminders Router ------------------
+try {
+  app.use('/api/reminders', remindersRouter);
+  console.log('✅ Mounted /api/reminders router successfully');
+} catch (err) {
+  console.error('❌ Failed to mount reminders router:', err);
+}
 
+// ------------------ Root Test Endpoint ------------------
+app.get('/', (req, res) =>
+  res.send(`Proxy alive. Proxying to ${TARGET_URL || '<TARGET_URL not set>'}`)
+);
+
+// ------------------ Start Server ------------------
 app.listen(PORT, () => {
-  console.log(`Proxy listening on port ${PORT}`);
-  console.log(`Proxying to ${TARGET_URL || '<TARGET_URL not set>'}`);
+  console.log(`🚀 Proxy listening on port ${PORT}`);
+  console.log(`🔗 Proxying to ${TARGET_URL || '<TARGET_URL not set>'}`);
+  console.log(`🧩 Reminders router active at /api/reminders`);
 });
