@@ -11,7 +11,7 @@ const path = require('path');
 const Papa = require('papaparse');
 
 // NEW for reminder router dependencies
-const remindersRouter = require('./reminders'); // <-- make sure reminders.js is in same folder
+const remindersRouter = require('./reminders.cjs');
 
 // ------------------ App Setup ------------------
 const app = express();
