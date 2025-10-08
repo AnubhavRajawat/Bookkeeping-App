@@ -1,4 +1,4 @@
-// reminders.js
+/* reminders.cjs - reminder router with nodemailer + cron */
 const express = require('express');
 const fs = require('fs-extra');
 const path = require('path');
@@ -8,130 +8,103 @@ const cron = require('node-cron');
 const router = express.Router();
 const REMINDERS_FILE = path.join(__dirname, 'reminders.json');
 
-// Ensure storage file exists
-fs.ensureFileSync(REMINDERS_FILE);
+// ensure reminders file exists
+if (!fs.existsSync(REMINDERS_FILE)) {
+  try { fs.writeJsonSync(REMINDERS_FILE, []); } catch (e) { console.warn('Could not create reminders.json', e); }
+}
 
-// --- Email transporter ---
+// transporter - requires env vars in Render
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
-  port: process.env.SMTP_PORT || 587,
-  secure: process.env.SMTP_SECURE === 'true', // true for 465
+  port: parseInt(process.env.SMTP_PORT || '587', 10),
+  secure: process.env.SMTP_SECURE === 'true',
   auth: {
     user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
+    pass: process.env.SMTP_PASS
+  }
 });
 
-// --- Helper functions ---
 async function loadReminders() {
-  try {
-    const data = await fs.readJson(REMINDERS_FILE);
-    return Array.isArray(data) ? data : [];
-  } catch {
-    return [];
-  }
+  try { return await fs.readJson(REMINDERS_FILE); } catch { return []; }
 }
+async function saveReminders(list) { await fs.writeJson(REMINDERS_FILE, list, { spaces: 2 }); }
 
-async function saveReminders(list) {
-  await fs.writeJson(REMINDERS_FILE, list, { spaces: 2 });
-}
-
-// Register or update reminder
-router.post('/', async (req, res) => {
-  const record = req.body || {};
-  if (!record.companyNo && !record.companyName) {
-    return res.status(400).json({ error: 'Missing companyNo or companyName' });
-  }
-
-  const reminders = await loadReminders();
-  const idx = reminders.findIndex(
-    (r) => r.companyNo === record.companyNo || r.companyName === record.companyName
-  );
-
-  const newEntry = {
-    ...record,
-    id: record.companyNo || record.companyName,
-    lastNotifiedAt: null,
-    active: true,
-    createdAt: new Date().toISOString(),
-  };
-
-  if (idx >= 0) reminders[idx] = newEntry;
-  else reminders.push(newEntry);
-
-  await saveReminders(reminders);
-  res.json({ success: true });
+router.get('/', async (req, res) => {
+  const list = await loadReminders();
+  res.json({ ok: true, count: list.length, reminders: list });
 });
 
-// Mark reminder complete (stop notifications)
+router.post('/', async (req, res) => {
+  const body = req.body || {};
+  if (!body.companyNo && !body.companyName) return res.status(400).json({ error: 'companyNo or companyName required' });
+
+  const list = await loadReminders();
+  const key = body.companyNo || (body.companyName + '::' + (body.reference || ''));
+  const idx = list.findIndex(r => r.key === key);
+  const entry = {
+    key,
+    companyNo: body.companyNo || '',
+    companyName: body.companyName || '',
+    bookkeeper: body.bookkeeper || '',
+    bookkeeperEmail: body.bookkeeperEmail || body.email || '',
+    status: body.status || '',
+    period: body.period || '',
+    reference: body.reference || '',
+    active: body.status !== 'Completed',
+    lastNotifiedAt: null,
+    createdAt: new Date().toISOString()
+  };
+  if (idx >= 0) list[idx] = { ...list[idx], ...entry }; else list.push(entry);
+  await saveReminders(list);
+  res.json({ success: true, entry });
+});
+
 router.post('/complete', async (req, res) => {
   const { companyNo, companyName } = req.body || {};
-  if (!companyNo && !companyName) {
-    return res.status(400).json({ error: 'Missing identifier' });
+  if (!companyNo && !companyName) return res.status(400).json({ error: 'companyNo or companyName required' });
+  const list = await loadReminders();
+  for (const r of list) {
+    if (r.companyNo === companyNo || r.companyName === companyName) { r.active = false; r.status = 'Completed'; }
   }
-
-  const reminders = await loadReminders();
-  reminders.forEach((r) => {
-    if (r.companyNo === companyNo || r.companyName === companyName) r.active = false;
-  });
-
-  await saveReminders(reminders);
+  await saveReminders(list);
   res.json({ success: true });
 });
 
-// List all reminders
-router.get('/', async (req, res) => {
-  const reminders = await loadReminders();
-  res.json(reminders);
-});
-
-// --- Daily cron job for email reminders ---
-async function sendReminders() {
-  const reminders = await loadReminders();
-  const now = new Date();
-  const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
-  let sentCount = 0;
-
-  for (const r of reminders) {
+async function sendRemindersOnce() {
+  const list = await loadReminders();
+  for (const r of list) {
     if (!r.active) continue;
-    if (!r.bookkeeperEmail && !r.email) continue;
-
-    const lastSent = r.lastNotifiedAt ? r.lastNotifiedAt.slice(0, 10) : null;
-    if (lastSent === today) continue; // skip already sent today
-
     const to = r.bookkeeperEmail || r.email;
-    const subject = `Reminder: ${r.companyName || r.companyNo} still pending`;
-    const text = `Hi ${r.bookkeeper || 'Team'},\n\n` +
-      `This is a reminder that the bookkeeping task for "${r.companyName || r.companyNo}" is still pending.\n\n` +
-      `Status: ${r.status || 'N/A'}\n` +
-      `Period: ${r.period || 'N/A'}\n\n` +
-      `Please complete or update the status if already done.\n\n` +
-      `- Automated Bookkeeping Reminder Bot`;
-
+    if (!to) continue;
     try {
       await transporter.sendMail({
         from: process.env.EMAIL_FROM || process.env.SMTP_USER,
         to,
-        subject,
-        text,
+        subject: `Reminder: ${r.companyName || r.companyNo} pending`,
+        text: `Reminder for ${r.companyName || r.companyNo}\nStatus: ${r.status || 'N/A'}\nPeriod: ${r.period || 'N/A'}`
       });
-
-      r.lastNotifiedAt = now.toISOString();
-      sentCount++;
-      console.log(`✅ Reminder sent to ${to} for ${r.companyName || r.companyNo}`);
+      r.lastNotifiedAt = new Date().toISOString();
+      console.log('Sent reminder to', to, 'for', r.key);
     } catch (err) {
-      console.error(`❌ Failed to send reminder to ${to}:`, err.message);
+      console.error('Failed to send to', to, err.message || err);
     }
   }
-
-  await saveReminders(reminders);
-  if (sentCount) console.log(`📧 Sent ${sentCount} reminders on ${today}`);
+  await saveReminders(list);
 }
 
-// Run every day at 9 AM server time
-cron.schedule('0 9 * * *', () => {
-  console.log('Running daily reminder cron at 9 AM...');
-  sendReminders().catch((e) => console.error('Cron error:', e));
+router.get('/send-now', async (req, res) => {
+  try {
+    await sendRemindersOnce();
+    res.json({ ok: true, message: 'send-now executed' });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// daily cron at 09:00
+cron.schedule('0 9 * * *', async () => {
+  console.log('Running daily reminders cron...');
+  try { await sendRemindersOnce(); } catch (e) { console.error('Cron error', e); }
 });
 
 module.exports = router;
