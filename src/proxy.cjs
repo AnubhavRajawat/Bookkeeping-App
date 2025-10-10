@@ -24,7 +24,7 @@ const UPLOAD_SECRET = process.env.UPLOAD_SECRET || process.env.UPLOAD_SECRET_KEY
 const allowedOriginsList = (process.env.CORS_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean);
 
 // ensure uploads dir
-const UPLOAD_DIR = path.resolve(__dirname, 'uploads');
+const UPLOAD_DIR = path.resolve(process.cwd(), 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // multer setup: store as master.csv
